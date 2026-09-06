@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "name": "中国主要城市示例点",
+  "features": [
+    { "type": "Feature", "properties": { "name": "北京", "type": "直辖市" }, "geometry": { "type": "Point", "coordinates": [116.4074, 39.9042] } },
+    { "type": "Feature", "properties": { "name": "上海", "type": "直辖市" }, "geometry": { "type": "Point", "coordinates": [121.4737, 31.2304] } },
+    { "type": "Feature", "properties": { "name": "广州", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [113.2644, 23.1291] } },
+    { "type": "Feature", "properties": { "name": "深圳", "type": "经济特区" }, "geometry": { "type": "Point", "coordinates": [114.0579, 22.5431] } },
+    { "type": "Feature", "properties": { "name": "成都", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [104.0665, 30.5723] } },
+    { "type": "Feature", "properties": { "name": "重庆", "type": "直辖市" }, "geometry": { "type": "Point", "coordinates": [106.5516, 29.5630] } },
+    { "type": "Feature", "properties": { "name": "武汉", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [114.3054, 30.5931] } },
+    { "type": "Feature", "properties": { "name": "西安", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [108.9398, 34.3416] } },
+    { "type": "Feature", "properties": { "name": "杭州", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [120.1551, 30.2741] } },
+    { "type": "Feature", "properties": { "name": "南京", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [118.7969, 32.0603] } },
+    { "type": "Feature", "properties": { "name": "沈阳", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [123.4315, 41.8057] } },
+    { "type": "Feature", "properties": { "name": "哈尔滨", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [126.5349, 45.8038] } },
+    { "type": "Feature", "properties": { "name": "乌鲁木齐", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [87.6168, 43.8256] } },
+    { "type": "Feature", "properties": { "name": "拉萨", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [91.1409, 29.6456] } },
+    { "type": "Feature", "properties": { "name": "昆明", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [102.8329, 24.8801] } },
+    { "type": "Feature", "properties": { "name": "兰州", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [103.8343, 36.0611] } },
+    { "type": "Feature", "properties": { "name": "郑州", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [113.6254, 34.7466] } },
+    { "type": "Feature", "properties": { "name": "长沙", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [112.9388, 28.2282] } },
+    { "type": "Feature", "properties": { "name": "福州", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [119.2965, 26.0745] } },
+    { "type": "Feature", "properties": { "name": "海口", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [110.1999, 20.0444] } },
+    { "type": "Feature", "properties": { "name": "台北", "type": "省会" }, "geometry": { "type": "Point", "coordinates": [121.5654, 25.0330] } },
+    { "type": "Feature", "properties": { "name": "香港", "type": "特别行政区" }, "geometry": { "type": "Point", "coordinates": [114.1694, 22.3193] } },
+    { "type": "Feature", "properties": { "name": "澳门", "type": "特别行政区" }, "geometry": { "type": "Point", "coordinates": [113.5439, 22.1987] } }
+  ]
+}

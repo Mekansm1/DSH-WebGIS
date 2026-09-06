@@ -1,0 +1,15 @@
+# dsh-webgis bundle 补丁：把插件行插入 host 组合
+- insert:
+    - id: webgis
+      name: dsh-webgis
+      config:
+        # 默认底图（Carto light tiles，开发用；可换 OSM / 自建）
+        baseTileUrl: https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png
+        # （不再默认加载示例数据集 assets/sample.geojson；需要的话可取消注释下一行）
+        # defaultDataset: assets/sample.geojson
+        # 视觉模型（看图委托）：主模型为文本模型时，webgis_get_pick 会委托此模型分析地图截图
+        # 并返回文字分析。需先在 DSH 里配置好对应 provider 的 adapter 与 API key。
+        # 留空 / 不写则纯文本模型只拿到坐标+要素+截图范围（不看图）。
+        # vision:
+        #   provider: <如 qwen-vl / glm / openai 等已配置的 provider 路由>
+        #   model: <视觉模型 id，如 qwen-vl-max>

@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+
+# 构建产物（tsc 逐文件 / tsdown 懒 chunk / copy-assets 拷贝；npm run build 可再生）
+lib/
+assets/*.js
+assets/*.css
+assets/maplibre-gl-csp-worker.js
+assets/earcut-worker.min.js
+
+# npm 打包 / 备份产物
+*.tgz
+*.zip
+
+# 内部文档与临时调试脚本（不对外）
+待办清单.md
+dsh-webgis-开发总结.md
+terra-test.mjs
+
+# 环境 / 编辑器
+*.log
+.DS_Store
+Thumbs.db

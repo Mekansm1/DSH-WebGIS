@@ -1,0 +1,1298 @@
+/* ============ 组件样式 ============ */
+
+/* GIS 地图层：填满 overlayLayer（全帧） */
+.gisLayer {
+  position: absolute;
+  inset: 0;
+}
+
+.mapView {
+  position: absolute;
+  inset: 0;
+}
+
+.mapViewCanvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* 模式选择器：root 可点穿透，仅卡片可交互 */
+.modeSelectorRoot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none !important;
+}
+
+.modeSelectorCard {
+  pointer-events: auto;
+  width: 420px;
+  max-width: 90%;
+  padding: 24px;
+  border-radius: 12px;
+  background: rgba(26, 35, 50, 0.95);
+  border: 1px solid #2d3a4f;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  color: #e7ecf3;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.modeSelectorTitle {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.modeSelectorSub {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: #9aa8bc;
+}
+
+.modeSelectorOptions {
+  display: flex;
+  gap: 12px;
+}
+
+.modeOption {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid #2d3a4f;
+  background: #243044;
+  color: #e7ecf3;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+
+.modeOption:hover {
+  border-color: #3b82f6;
+  background: #2a3a55;
+}
+
+.modeOptionTitle {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.modeOptionDesc {
+  font-size: 12px;
+  color: #9aa8bc;
+}
+
+/* 会话头部模式切换按钮 */
+.modeToggle {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #2d3a4f;
+  background: #243044;
+  color: #9aa8bc;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.modeToggle:hover {
+  color: #e7ecf3;
+  border-color: #3b82f6;
+}
+
+/* 浮动模式切换按钮：活跃会话里随时切换传统/GIS。
+   GIS 模式下渲染在地图层内（地图右上角）；传统模式下渲染为 overlay 直接子元素（全屏右上角）。
+   两种上下文都用 position:absolute + top/right 定位，离 position:absolute 的 overlayLayer 定位。 */
+.modeFloat {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 40;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid #3b82f6;
+  background: rgba(26, 35, 50, 0.92);
+  color: #e7ecf3;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.modeFloat:hover {
+  border-color: #60a5fa;
+  background: #243044;
+}
+
+/* ============ 点击属性浮窗（maplibre Popup 内容 + 深色覆盖） ============ */
+
+/* 深色主题覆盖 maplibre 默认白底 Popup（页面色调偏深，白底刺眼）。
+   注意：maplibre-gl.css 是插件 apply 时以 <link> 追加到 <head>，晚于本模块 <style>，
+   同优先级下会覆盖我们——所以选择器必须带 .maplibregl-popup 祖先前缀提级（2~3 类 > 1~2 类）。 */
+:global(.maplibregl-popup .maplibregl-popup-content) {
+  background: #243044;
+  color: #e7ecf3;
+  border: 1px solid #2d3a4f;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 10px 12px;
+}
+
+:global(.maplibregl-popup .maplibregl-popup-close-button) {
+  color: #9aa8bc;
+  font-size: 18px;
+  padding: 2px 8px;
+}
+
+:global(.maplibregl-popup .maplibregl-popup-close-button:hover) {
+  color: #e7ecf3;
+}
+
+/* 三角箭头与内容同色（maplibre 用 border 实现 tip）。 */
+:global(.maplibregl-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip) {
+  border-top-color: #243044;
+}
+
+:global(.maplibregl-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip) {
+  border-bottom-color: #243044;
+}
+
+:global(.maplibregl-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip) {
+  border-left-color: #243044;
+}
+
+:global(.maplibregl-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip) {
+  border-right-color: #243044;
+}
+
+/* 浮窗内容：标题 + 元信息 + 两列属性表 + 全部属性展开按钮 */
+.popupRoot {
+  max-height: 360px;
+  overflow-y: auto;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.popupTitle {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  color: #e7ecf3;
+}
+
+.popupMeta {
+  font-size: 11px;
+  color: #9aa8bc;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.popupTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.popupTable th,
+.popupTable td {
+  text-align: left;
+  vertical-align: top;
+  padding: 3px 6px;
+  border-top: 1px solid #2d3a4f;
+  word-break: break-word;
+}
+
+.popupTable th {
+  color: #9aa8bc;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 45%;
+}
+
+.popupTable td {
+  color: #e7ecf3;
+}
+
+.popupEmpty {
+  color: #9aa8bc;
+  padding: 4px 0;
+}
+
+.popupToggle {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #2d3a4f;
+  color: #9aa8bc;
+  background: 0 0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.popupToggle:hover {
+  color: #e7ecf3;
+  border-color: #3b82f6;
+}
+
+/* ============ 图层面板（地图工具条） ============ */
+
+/* 图层面板 + 绘图工具条的定位容器（面板与其下方的创建工具条一起拖动）。 */
+.layerStack {
+  position: absolute;
+  left: 12px;
+  top: 56px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.layerPanel {
+  position: relative;
+  width: 272px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 200px);
+  border-radius: 10px;
+  background: rgba(26, 35, 50, 0.92);
+  border: 1px solid #2d3a4f;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #e7ecf3;
+}
+
+.layerPanelHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #2d3a4f;
+}
+
+.layerPanelToggle {
+  appearance: none;
+  background: 0 0;
+  border: 0;
+  color: #e7ecf3;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 0;
+  flex: 1;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.layerPanelHeadActions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.layerImportBtn,
+.layerActionBtn {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #2d3a4f;
+  border-radius: 6px;
+  background: 0 0;
+  color: #9aa8bc;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 2px 8px;
+  white-space: nowrap;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.layerImportBtn {
+  color: #e7ecf3;
+  border-color: #3b82f6;
+}
+
+/* 创建要素按钮：头部主操作（比导入/清空更醒目） */
+.layerCreateBtn {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  background: #1e4a8a;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 2px 8px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+}
+
+.layerCreateBtn:hover:not(:disabled) {
+  background: #2a5fb0;
+}
+
+.layerImportBtn:hover:not(:disabled) {
+  background: #2a3a55;
+}
+
+.layerActionBtn:hover:not(:disabled) {
+  color: #e7ecf3;
+  border-color: #3b82f6;
+}
+
+.layerImportBtn:disabled,
+.layerActionBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.layerList {
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.layerEmpty {
+  color: #9aa8bc;
+  font-size: 12px;
+  padding: 10px 8px;
+  text-align: center;
+}
+
+.layerRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: context-menu;
+}
+
+.layerRow:hover {
+  background: #243044;
+}
+
+.layerVis {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  cursor: pointer;
+}
+
+.layerRowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.layerRowName {
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.layerRowMeta {
+  font-size: 10px;
+  color: #9aa8bc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 折叠悬浮图标：可拖动的小按钮，点按展开面板 */
+.layerPanelIcon {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(26, 35, 50, 0.92);
+  border: 1px solid #2d3a4f;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  color: #e7ecf3;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  z-index: 20;
+}
+
+.layerPanelIcon:active {
+  cursor: grabbing;
+}
+
+/* 右键菜单：跟随光标，浮层点击空白关闭 */
+.layerMenuOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.layerMenu {
+  position: absolute;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(26, 35, 50, 0.96);
+  border: 1px solid #2d3a4f;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #e7ecf3;
+}
+
+.layerMenuTitle {
+  padding: 6px 10px 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9aa8bc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid #2d3a4f;
+}
+
+.layerMenuLabel {
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  color: #9aa8bc;
+}
+
+.layerMenuItem {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #e7ecf3;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.layerMenuItem:hover {
+  background: #243044;
+  color: #ffffff;
+}
+
+.layerMenuItemDanger {
+  color: #f87171;
+}
+
+.layerMenuItemDanger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.layerMenuDivider {
+  margin: 4px 0;
+  border-top: 1px solid #2d3a4f;
+}
+
+/* ============ 属性抽屉 ============ */
+
+.attrDrawer {
+  position: absolute;
+  right: 12px;
+  top: 56px;
+  bottom: 12px;
+  width: 400px;
+  max-width: calc(100% - 24px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  background: rgba(26, 35, 50, 0.95);
+  border: 1px solid #2d3a4f;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #e7ecf3;
+  overflow: hidden;
+}
+
+.attrDrawerHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #2d3a4f;
+}
+
+.attrDrawerTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attrDrawerClose {
+  appearance: none;
+  background: 0 0;
+  border: 0;
+  color: #9aa8bc;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.attrDrawerClose:hover {
+  color: #e7ecf3;
+}
+
+.attrDrawerNote {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #9aa8bc;
+  border-bottom: 1px solid #2d3a4f;
+}
+
+.attrDrawerBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px;
+}
+
+.attrTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.attrTable th,
+.attrTable td {
+  text-align: left;
+  vertical-align: top;
+  padding: 4px 6px;
+  border-top: 1px solid #243044;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attrTable thead th {
+  position: sticky;
+  top: 0;
+  background: #1a2332;
+  color: #9aa8bc;
+  font-weight: 500;
+  z-index: 1;
+  border-top: 0;
+}
+
+.attrTable tbody tr:hover {
+  background: #243044;
+}
+
+.attrIdx {
+  color: #9aa8bc;
+  font-size: 10px;
+}
+
+/* ============ 设置页：WebGIS 视觉模型配置卡片 ============ */
+/* 外观复刻 DSH 内置插件卡片（settings-plugins 包的 PluginCard + ValueField）：
+   折叠头（名称/描述/chevron）+ 展开后的字段行 + 底部「放弃修改/保存」，
+   全部使用内置卡片同一套 --dsw-alias-* 设计 token，字体样式完全一致。 */
+
+/* 卡片外壳（对应内置 <li>） */
+.settingsCard {
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-3);
+  border-radius: 12px;
+  list-style: none;
+  transition: border-color 0.16s, background 0.16s;
+}
+
+.settingsCard:hover {
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+.settingsCardOpen {
+  background: var(--dsw-alias-bg-layer-2);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+/* 折叠头：整个头部是可点按钮，点击展开/收起 */
+.settingsHeader {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: 0 0;
+  border: 0;
+  border-radius: 12px;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  display: flex;
+}
+
+.settingsHeader:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+.settingsHeadText {
+  flex-direction: column;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+  display: flex;
+}
+
+.settingsName {
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.settingsDesc {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settingsChevron {
+  color: var(--dsw-alias-label-tertiary);
+  flex: none;
+  transition: transform 0.16s;
+}
+
+.settingsChevronOpen {
+  transform: rotate(180deg);
+}
+
+/* 头部「未保存」徽标（有未保存修改时出现） */
+.settingsPending {
+  white-space: nowrap;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+  border-radius: 999px;
+  flex: none;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 17px;
+}
+
+/* 展开后的正文（字段区 + 底部按钮） */
+.settingsBody {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  margin: 0 16px;
+  padding-bottom: 8px;
+}
+
+/* 字段行（复刻内置 ValueField） */
+.settingsField {
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+  display: flex;
+}
+
+.settingsField + .settingsField {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.settingsFieldHead {
+  align-items: center;
+  gap: 8px;
+  display: flex;
+}
+
+.settingsFieldLabel {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.settingsFieldBadges {
+  align-items: center;
+  gap: 8px;
+  display: inline-flex;
+}
+
+.settingsFieldBadge {
+  white-space: nowrap;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 17px;
+}
+
+.settingsFieldReset {
+  font: inherit;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: 0 0;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settingsFieldReset:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+}
+
+.settingsFieldReset:disabled {
+  cursor: default;
+}
+
+.settingsFieldInput {
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-3);
+  height: 34px;
+  font: inherit;
+  color: var(--dsw-alias-label-primary);
+  border-radius: 8px;
+  padding: 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settingsFieldInput:focus-visible {
+  border-color: var(--dsw-alias-brand-primary);
+  outline: none;
+}
+
+.settingsFieldInput:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
+.settingsHint {
+  color: var(--dsw-alias-label-tertiary);
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 底部：失败信息 + 放弃修改 / 保存 */
+.settingsFooter {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0 4px;
+  display: flex;
+}
+
+.settingsFailed {
+  min-width: 0;
+  color: var(--dsw-alias-label-error);
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 卡片最底部署名行：作者 / 意见反馈 */
+.settingsAbout {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  margin-top: 12px;
+  padding-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.settingsAbout a {
+  color: inherit;
+  text-decoration: none;
+}
+.settingsAbout a:hover {
+  text-decoration: underline;
+}
+
+/* 成功状态文本（PostGIS 卡片操作结果） */
+.settingsStatus {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* PostGIS 卡片：分组小标题（如「加载阈值」） */
+.settingsSectionLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  margin: 12px 0 0;
+  line-height: 1.5;
+}
+
+/* PostGIS 卡片：测试连接 / 重读库结构 / 清除 操作按钮行 */
+.settingsActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 2px;
+}
+
+.settingsAction {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+  background: 0 0;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settingsAction:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+.settingsAction:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.settingsDiscard,
+.settingsSave {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #0000;
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settingsDiscard {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+  background: 0 0;
+}
+
+.settingsDiscard:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+.settingsSave {
+  background: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-bg-layer-3);
+}
+
+.settingsDiscard:disabled,
+.settingsSave:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.settingsDiscard:focus-visible,
+.settingsSave:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+/* ---- 合并卡片：子区块（视觉 / PostGIS）---- */
+
+.settingsSubsection {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  padding: 0;
+}
+
+.settingsSubsection .settingsBody {
+  margin: 0;
+}
+
+.settingsSubsection .settingsHeader {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* ---- 启停开关行 ---- */
+
+.settingsToggleRow {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  display: flex;
+}
+
+.settingsToggleText {
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  display: flex;
+}
+
+.settingsToggleLabel {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+/* switch（role="switch" button） */
+.settingsSwitch {
+  appearance: none;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-module-platform);
+  cursor: pointer;
+  position: relative;
+  flex: none;
+  transition: background 0.16s, border-color 0.16s;
+}
+
+.settingsSwitch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+  transition: transform 0.16s, background 0.16s;
+}
+
+.settingsSwitch[data-on='true'] {
+  background: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.settingsSwitch[data-on='true']::before {
+  transform: translateX(18px);
+  background: #fff;
+}
+
+.settingsSwitch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 叠加地图服务列表行 */
+
+.settingsListRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.settingsListRowName {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settingsListRowKind {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin-left: 6px;
+}
+
+.settingsListRemove {
+  font: inherit;
+  font-size: 12px;
+  color: #f87171;
+  background: 0 0;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.settingsListRemove:hover {
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+/* ============ 左下角：绘图工具条 + 底图切换器 ============ */
+
+.mapBottomLeft {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* 底图切换器 */
+
+.baseSwitcher {
+  position: relative;
+}
+
+.baseSwitcherBtn {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  color: #e7ecf3;
+  background: rgba(26, 35, 50, 0.92);
+  border: 1px solid #2d3a4f;
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+
+.baseSwitcherBtn:hover {
+  border-color: #3b82f6;
+}
+
+.baseSwitcherPanel {
+  position: absolute;
+  left: 0;
+  bottom: 34px;
+  width: 240px;
+  background: rgba(26, 35, 50, 0.96);
+  border: 1px solid #2d3a4f;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  padding: 8px;
+}
+
+.baseSwitcherGroupLabel {
+  font-size: 11px;
+  color: #9aa8bc;
+  margin: 6px 8px 4px;
+}
+
+.baseSwitcherItem {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: #e7ecf3;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.baseSwitcherItem:hover {
+  background: #243044;
+}
+
+.baseSwitcherItemActive {
+  background: #243044;
+  border-left: 2px solid #3b82f6;
+  padding-left: 6px;
+}
+
+/* 绘图工具条 */
+
+.drawToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: 272px;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 10px;
+  background: rgba(26, 35, 50, 0.92);
+  border: 1px solid #2d3a4f;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+}
+
+.drawToolbarBtn {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  color: #9aa8bc;
+  background: 0 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.drawToolbarBtn:hover {
+  color: #e7ecf3;
+}
+
+.drawToolbarBtnActive {
+  color: #fff;
+  background: #2a3a55;
+  border-color: #3b82f6;
+}
+
+/* ============ GIS 布局全局规则（仅 html[data-webgis-gis] 生效） ============ */
+
+/* 左右分栏嵌入：左侧地图（shell.overlay 右裁掉消息面板宽度），右侧对话列实色面板 */
+/* 不再用「全页地图 + 半透明浮窗」——那会遮地图、还盖住 DSH 设置弹窗。 */
+
+/* 1. 地图层只占左侧：overlay 槽是 display:contents（无盒），实际盒是它的直接子元素。
+      left 从左侧会话列表之后开始（宽度由 GisSurface 实测写入 --webgis-sidebar-width），
+      否则地图 canvas 会延伸到被会话列表盖住的区域——截图多出隐藏部分、图框中心整体偏移。 */
+:global(html[data-webgis-gis]) [data-slot="shell.overlay"] > * {
+  position: absolute;
+  left: var(--webgis-sidebar-width, 0px);
+  top: 0;
+  bottom: 0;
+  right: 440px;
+}
+
+/* 2. 对话列：右侧 440px 嵌入面板（conversation 槽也是 display:contents，实际盒是 [data-phase]） */
+:global(html[data-webgis-gis]) [data-slot="conversation"] > [data-phase] {
+  width: 440px;
+  flex: 1 0 auto;
+  min-height: 0;
+  align-self: flex-end;
+  background: var(--dsw-alias-bg-base, #1a2334);
+  border-left: 1px solid var(--dsw-alias-border-l1, #2d3a4f);
+}
+
+/* 3. 会话列表保持可见（其下方是地图，需盖在地图之上） */
+:global(html[data-webgis-gis]) [data-slot="sidebar"] > * {
+  position: relative;
+  z-index: 30;
+}
+
+/* 4. GIS 模式隐藏右侧详情栏 */
+:global(html[data-webgis-gis]) [data-slot="details"] > * {
+  display: none;
+}
+
+/* ---- 出图弹窗（ExportMapDialog） ---- */
+.exportOverlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 12, 20, 0.55);
+  z-index: 1000;
+}
+.exportCard {
+  width: min(92vw, 480px);
+  max-height: 88vh;
+  overflow: auto;
+  background: rgba(18, 28, 40, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+  color: #e6edf3;
+  font-size: 13px;
+}
+.exportHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.exportClose {
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.exportClose:hover { color: #fff; }
+.exportBody { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.exportField { display: flex; flex-direction: column; gap: 4px; }
+.exportLabel { color: #9fb0c3; font-size: 12px; }
+.exportInput {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  color: #e6edf3;
+  padding: 6px 8px;
+  outline: none;
+}
+.exportInput:focus { border-color: #f97316; }
+.exportLayerList { max-height: 120px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+.exportLayerItem { display: flex; align-items: center; gap: 6px; }
+.exportSwatch { width: 14px; height: 10px; border-radius: 2px; flex: none; border: 1px solid rgba(255,255,255,.4); }
+.exportCheck { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; }
+.exportPreview { max-width: 100%; margin-top: 2px; border-radius: 6px; border: 1px solid rgba(255,255,255,.15); background:#000; }
+.exportErr { color: #f87171; font-size: 12px; }
+.exportActions { display: flex; gap: 8px; margin-top: 4px; }
+.exportBtn, .exportBtnPrimary {
+  flex: 1;
+  background: #26344a;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e6edf3;
+  border-radius: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.exportBtn:disabled { opacity: 0.5; cursor: default; }
+.exportBtn:hover:not(:disabled) { background: #31445f; }
+.exportBtnPrimary { background: #f97316; border-color: #f97316; color: #fff; }
+.exportBtnPrimary:hover:not(:disabled) { background: #fb923c; }
+
+/* GIS 懒加载占位：首次进 GIS 拉 gis chunk 时的居中提示。 */
+.gisLoading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9aa8bc;
+  font-size: 13px;
+  background: rgba(13, 17, 23, 0.6);
+}
