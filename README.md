@@ -107,3 +107,7 @@ dsh plugin --profile web add dsh-webgis
 > Long-term vision: **not merely "describing a picture" — the model truly inhabits spatial cognition, understanding the three-dimensional world behind the map.**
 
 > **Note:** DeepSeek's vision models were released only recently and are still iterating quickly, so the vision-related features have not yet been deeply tested.
+
+---
+
+**Author:** Frank Wang · **Feedback:** [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
