@@ -13,6 +13,7 @@ assets/earcut-worker.min.js
 *.zip
 
 # 内部文档与临时调试脚本（不对外）
+ARCHITECTURE.md
 待办清单.md
 dsh-webgis-开发总结.md
 terra-test.mjs
