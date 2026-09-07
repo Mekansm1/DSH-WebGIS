@@ -8,7 +8,7 @@ import type { ExportPrefill } from './ExportMapDialog.js'
 import type { WebgisT } from './webgis-i18n.js'
 import { ensure } from './chunk-loader.js'
 import { sessionUrl } from './sessionUrl.js'
-import { BASE_MAPS, baseMapAction, type BaseMapDef } from '../basemaps.js'
+import { BASE_MAPS, baseMapAction, CARTO_LIGHT_TILES, type BaseMapDef } from '../basemaps.js'
 import type { OverlayService } from '../webgis-services.js'
 import { BasemapSwitcher } from './BasemapSwitcher.js'
 import { hexbinFC } from './hex-bins.js'
@@ -17,6 +17,7 @@ import type { DeckChartMode } from './deck-charts.js'
 import { geojsonKindOf, rawLineData, rawPointData, rawPolygonData } from './geoarrow-utils.js'
 import type { DisplayMode, FeaturePayload, LayerSummary } from './gis-types.js'
 import type { FeatureCollection } from 'geojson'
+import { formatArea, formatDistance, haversineM, pathMeters, polygonAreaM2, ringPathMeters, segmentMeters, type Pt } from './measure-utils.js'
 
 interface StateResponse {
   baseTileUrl: string
@@ -195,9 +196,25 @@ function baseStyle(tiles: string[]): StyleSpecification {
   }
 }
 
+/** 视窗范围坐标小数位随 zoom 自适应：低倍省字符，高倍保精度（≥12 → 4 位，9+ → 3 位，6+ → 2 位，否则 1 位）。 */
+function fmtCoord(v: number, zoom: number): string {
+  const d = zoom >= 12 ? 4 : zoom >= 9 ? 3 : zoom >= 6 ? 2 : 1
+  const f = Math.round(v * 10 ** d) / 10 ** d
+  return Object.is(f, -0) ? '0' : String(f)
+}
+
 // ---- 底图切换 + 叠加服务 + 样式重建 ----
 
-/** 应用底图切换：光栅换瓦片 / 光栅重载样式 / 矢量样式整替换（顺手把 glyphs 打成 demotiles 保聚合圈数字字形）。 */
+/**
+ * 应用底图切换：光栅换瓦片 / 光栅重载样式 / 矢量样式整替换。
+ * 所有 setStyle 一律 { diff: false } 强制整样式重建：
+ * maplibre 对「已存在样式」默认走 smart-diff(_diffStyle)，从自定义小光栅样式 diff 成 Carto/OpenFreeMap
+ * 这类大型异构矢量样式时，矢量源被建但**层不重绘**（瓦片拉取解析正常却不显示，只剩背景灰底；
+ * 复现页 B 组「新建地图」正常即 diff:false = _updateStyle 全量重建 = 同一路径）。
+ * 矢量样式按 **URL 字符串** setStyle（不经页面 fetch/style 对象）：与「新建地图」同款，由 maplibre 内部拉取，
+ * 规避 DSH 页面 CSP 对跨域 fetch 的限制；不覆写 glyphs——矢量底图自带 Carto/OpenFreeMap 字体端点
+ * （demotiles 字体并不含数据层聚合圈要用的 Noto Sans Regular，原覆写反而有缺字形风险）。
+ */
 async function applyBaseMap(map: MapLibreMap, def: BaseMapDef, defaultTiles: string[]): Promise<void> {
   const url = def.kind === 'raster' && !def.url ? (defaultTiles[0] ?? '') : def.url
   const action = baseMapAction({ ...def, url }, map.getSource('base') != null)
@@ -206,23 +223,10 @@ async function applyBaseMap(map: MapLibreMap, def: BaseMapDef, defaultTiles: str
     return
   }
   if (action.kind === 'setStyleRaster') {
-    map.setStyle(baseStyle([action.url]))
+    map.setStyle(baseStyle([action.url]), { diff: false })
     return
   }
-  // 矢量样式：拉 style.json 把 glyphs 打成 demotiles 字体源（防聚合圈数字缺字形），失败回退原 URL。
-  try {
-    const res = await fetch(action.url)
-    if (!res.ok) throw new Error(`style ${res.status}`)
-    const style = (await res.json()) as { glyphs?: unknown }
-    if (style && typeof style === 'object') {
-      style.glyphs = 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf'
-      map.setStyle(style as StyleSpecification)
-      return
-    }
-    throw new Error('bad style json')
-  } catch {
-    map.setStyle(action.url)
-  }
+  map.setStyle(action.url, { diff: false })
 }
 
 /** 保证 data geojson 源 + data-points 图层存在（换过整套样式后按需补挂）。 */
@@ -235,6 +239,41 @@ function ensureDataLayers(map: MapLibreMap): void {
     source: 'data',
     paint: { 'circle-color': '#3b82f6', 'circle-radius': 6, 'circle-stroke-width': 1, 'circle-stroke-color': '#ffffff' },
   })
+}
+
+/** 测量渲染层：闭合面填充 / 线 / 顶点 / 预览（常驻；data 为空则不可见）。style 整重建后由 ensure 重新补齐。 */
+function ensureMeasureLayers(map: MapLibreMap): void {
+  if (map.getSource('measure')) return
+  map.addSource('measure', { type: 'geojson', data: EMPTY_COLLECTION as never })
+  map.addSource('measure-hover', { type: 'geojson', data: EMPTY_COLLECTION as never })
+  // 闭合为面时的半透明填充（放最底下，line 描边叠在上）
+  const fill: LayerSpecification = {
+    id: 'measure-fill', type: 'fill', source: 'measure',
+    paint: { 'fill-color': '#f59e0b', 'fill-opacity': 0.18 },
+  }
+  map.addLayer(fill)
+  const line: LayerSpecification = {
+    id: 'measure-line', type: 'line', source: 'measure',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': '#f59e0b', 'line-width': 2.5 },
+  }
+  map.addLayer(line)
+  const vertex: LayerSpecification = {
+    id: 'measure-vertex', type: 'circle', source: 'measure',
+    paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-width': 2, 'circle-stroke-color': '#f59e0b' },
+  }
+  map.addLayer(vertex)
+  const hover: LayerSpecification = {
+    id: 'measure-hover-line', type: 'line', source: 'measure-hover',
+    paint: { 'line-color': '#f59e0b', 'line-width': 1.5, 'line-dasharray': [2, 2] },
+  }
+  map.addLayer(hover)
+  // 吸附目标高亮圆环（measure-hover 源里的 Point 特征，吸附时可见）
+  const hoverVertex: LayerSpecification = {
+    id: 'measure-hover-vertex', type: 'circle', source: 'measure-hover',
+    paint: { 'circle-radius': 7, 'circle-color': 'rgba(255,255,255,0.4)', 'circle-stroke-width': 3, 'circle-stroke-color': '#f97316' },
+  }
+  map.addLayer(hoverVertex)
 }
 
 /** 同步叠加地图服务（WMTS/WMS/XYZ 光栅层）：加缺、换 URL、切可见性、移除已删。插在 data-points 之下。 */
@@ -671,6 +710,143 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
   const [attrLayer, setAttrLayer] = useState<LayerSummary | null>(null)
   /** 出图弹窗开关。 */
   const [exportOpen, setExportOpen] = useState(false)
+  /** 底部状态条：当前缩放级别 + 视窗四至（西/南/东/北），move/zoom 结束后刷新；null = 地图未就绪前不显示。 */
+  const [viewInfo, setViewInfo] = useState<{ zoom: number; w: number; s: number; e: number; n: number } | null>(null)
+
+  // ---- 测量：点击加点沿折线测长；点回起点闭合 → 同时给周长+面积；自动吸附图层点。只读，不落地成图层。 ----
+  const [measuring, setMeasuring] = useState(false)
+  const measuringRef = useRef(false)
+  measuringRef.current = measuring
+  /** 已提交的测量顶点（折线 / 闭合多边形环）。 */
+  const measurePts = useRef<Pt[]>([])
+  /** 当前是否闭合为面（≥3 点且点回起点触发）。 */
+  const [measureClosed, setMeasureClosed] = useState(false)
+  const measureClosedRef = useRef(false)
+  measureClosedRef.current = measureClosed
+  /** 逐段距离（米），加点/收尾时重算（驱动 readout 渲染）。 */
+  const [measureSegs, setMeasureSegs] = useState<number[]>([])
+  /** 是否收尾保留了结果（非测量中也显示，再点测量即清空开新一轮）。 */
+  const [measureDone, setMeasureDone] = useState(false)
+  /** mousemove 实时预览段长文字（末点→光标），直写 DOM 避免逐帧 setState。 */
+  const measurePreviewEl = useRef<HTMLSpanElement | null>(null)
+  /** 双击去抖：双击的两记 click 只算一记（第二记交给 dblclick 收尾）。 */
+  const lastMeasureClick = useRef(0)
+  /** 吸附阈值（像素）。吸附对象 = 本次测量**已画出的顶点**（含起点），用于精确对齐与点回起点闭合。 */
+  const SNAP_PX = 20
+  /** 像素距离最近且在 SNAP_PX 内的候选；无则 null。 */
+  const nearestPixelPt = (map: MapLibreMap, x: number, y: number, cands: Pt[]): { pt: Pt; d2: number } | null => {
+    let best: { pt: Pt; d2: number } | null = null
+    const lim = SNAP_PX * SNAP_PX
+    for (const p of cands) {
+      const s = map.project([p.lon, p.lat])
+      const dx = s.x - x
+      const dy = s.y - y
+      const d2 = dx * dx + dy * dy
+      if (d2 <= lim && (best == null || d2 < best.d2)) best = { pt: p, d2 }
+    }
+    return best
+  }
+  /** 测量时可吸附的自己顶点：≥3 点后才启用（此前除起点外没有可复用的点）；
+   *  取除最近一个以外的全部（含起点）——避免刚点完就叠在同一点，且 2 点时不会误把第二点叠回起点。 */
+  const ownSnapCands = (): Pt[] => {
+    const pts = measurePts.current
+    return pts.length >= 3 ? pts.slice(0, pts.length - 1) : []
+  }
+
+  /** 已提交顶点 → measure 源（折线 / 闭合多边形 + 顶点圆点）。 */
+  const writeMeasure = (): void => {
+    const map = mapRef.current
+    const src = map?.getSource('measure') as GeoJSONSource | undefined
+    if (!src) return
+    const pts = measurePts.current
+    if (pts.length === 0) { src.setData(EMPTY_COLLECTION); return }
+    const coords = pts.map((p): [number, number] => [p.lon, p.lat])
+    const feats: unknown[] = []
+    if (measureClosedRef.current && pts.length >= 3) {
+      // 闭合：一个多边形（fill 层填充、line 层描边），顶点仍画圆点。
+      feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[...coords, coords[0]!]] } })
+    } else if (pts.length >= 2) {
+      feats.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } })
+    } else {
+      feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: coords[0] } })
+    }
+    for (const c of coords) feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } })
+    src.setData({ type: 'FeatureCollection', features: feats } as never)
+  }
+  /** 末点→target 虚线预览 + 实时段长；吸附时在 target 画高亮点。null 清除。 */
+  const writeMeasurePreview = (pv: { pt: Pt; snapped?: boolean } | null): void => {
+    const map = mapRef.current
+    const hover = map?.getSource('measure-hover') as GeoJSONSource | undefined
+    const last = measurePts.current[measurePts.current.length - 1]
+    const el = measurePreviewEl.current
+    if (hover && pv && last) {
+      const hf: unknown[] = [
+        { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[last.lon, last.lat], [pv.pt.lon, pv.pt.lat]] } },
+      ]
+      if (pv.snapped) hf.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [pv.pt.lon, pv.pt.lat] } })
+      hover.setData({ type: 'FeatureCollection', features: hf } as never)
+      if (el) el.textContent = `  + ${formatDistance(haversineM(last, pv.pt))}`
+    } else {
+      if (hover) hover.setData(EMPTY_COLLECTION)
+      if (el) el.textContent = ''
+    }
+  }
+  /** 测量时光标变十字 + 禁双击缩放；结束恢复。 */
+  const setMeasureCursor = (cross: boolean): void => {
+    const map = mapRef.current
+    if (!map) return
+    map.getCanvas().style.cursor = cross ? 'crosshair' : ''
+    try { if (cross) map.doubleClickZoom.disable(); else map.doubleClickZoom.enable() } catch { /* 忽略 */ }
+  }
+  const beginMeasure = (): void => {
+    measurePts.current = []
+    setMeasureSegs([])
+    setMeasureDone(false)
+    setMeasureClosed(false)
+    measureClosedRef.current = false
+    measuringRef.current = true
+    setMeasuring(true)
+    writeMeasure()
+    writeMeasurePreview(null)
+    setMeasureCursor(true)
+  }
+  /** 收尾：open=true 保留开环长度；closed=true 保留闭合周长+面积（≥3 点）；都 false 则清空。 */
+  const endMeasure = (open: boolean, closed: boolean): void => {
+    measuringRef.current = false
+    setMeasuring(false)
+    setMeasureCursor(false)
+    writeMeasurePreview(null)
+    const pts = measurePts.current
+    const ok = closed ? pts.length >= 3 : open && pts.length >= 2
+    if (ok) {
+      measureClosedRef.current = closed
+      setMeasureClosed(closed)
+      setMeasureSegs(segmentMeters(pts))
+      setMeasureDone(true)
+    } else {
+      measurePts.current = []
+      measureClosedRef.current = false
+      setMeasureClosed(false)
+      setMeasureSegs([])
+      setMeasureDone(false)
+    }
+    writeMeasure()
+  }
+  const finishMeasure = (): void => endMeasure(true, false)
+  const finishClosedMeasure = (): void => endMeasure(true, true)
+  const discardMeasure = (): void => endMeasure(false, false)
+  const addMeasureVertex = (p: Pt): void => {
+    measurePts.current.push(p)
+    setMeasureSegs(segmentMeters(measurePts.current))
+    writeMeasure()
+    writeMeasurePreview(null)
+  }
+  const toggleMeasure = (): void => { if (measuringRef.current) finishMeasure(); else beginMeasure() }
+  /** 开环累计长文本（未开始/已清空返回 ''）。 */
+  const measureLengthText = (): string => (measurePts.current.length >= 2 ? formatDistance(pathMeters(measurePts.current)) : '')
+  /** 闭合周长 / 面积文本。 */
+  const measurePerimeterText = (): string => (measurePts.current.length >= 3 ? formatDistance(ringPathMeters(measurePts.current)) : '')
+  const measureAreaText = (): string => (measurePts.current.length >= 3 ? formatArea(polygonAreaM2(measurePts.current)) : '')
   /** AI 出图请求预填（webgis_export_map）。 */
   const [exportPrefill, setExportPrefill] = useState<ExportPrefill | null>(null)
   const lastExportSeq = useRef(0)
@@ -749,7 +925,7 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     maplibregl.setWorkerUrl('/webgis/maplibre-gl-csp-worker.js')
     const map = new maplibregl.Map({
       container,
-      style: baseStyle(['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png']),
+      style: baseStyle([CARTO_LIGHT_TILES]),
       center: [104, 35],
       zoom: 3,
       attributionControl: false,
@@ -763,7 +939,19 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     // deck.gl 出图 overlay 不再建图时 eager 构造：首个「需 deck 渲染」的图层出现时才经 ensureDeckForMap
     // 懒拉 deck.js chunk → 建 controller → setMap → ensureOverlay（interleaved 需 map load 后 WebGL painter
     // 就绪；ensureDeckForMap 内对 map.loaded() 与 'load' once 已做兼容，首个 deck 层晚于 load 出现时即时建）。
-    map.on('load', () => map.resize())
+    // 底部状态条：当前缩放 + 视窗范围。地图就绪/每次平移缩放结束后刷一次（低频，无每帧开销）。
+    const syncViewInfo = (): void => {
+      const b = map.getBounds()
+      setViewInfo({ zoom: map.getZoom(), w: b.getWest(), s: b.getSouth(), e: b.getEast(), n: b.getNorth() })
+    }
+    map.on('load', () => {
+      map.resize()
+      syncViewInfo()
+      // 测距常驻源/层（初始光栅样式就绪时建好；此后切底图整重建由 rebuildAfterStyleLoad 补齐）。
+      ensureMeasureLayers(map)
+    })
+    map.on('moveend', syncViewInfo)
+    map.on('zoomend', syncViewInfo)
 
     // 属性浮窗：复用组件级 closePopup（同一时刻最多一个，新点击先关旧的）。
     const showFeaturePopup = (feature: FeaturePayload, lngLat: { lng: number; lat: number }): void => {
@@ -802,6 +990,29 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     //   空点击   → 落图钉标记关注点 + 记录 pick（供 AI 引用坐标）
     // 截图红点 = 关注位置（点击处或图框中心），始终合成在截图里（与 DOM 图钉无关）。
     map.on('click', (e) => {
+      // 测量激活：左键加点。双击会连发两记 click，间隔 <300ms 的第二记交给 dblclick 收尾，不加点。
+      if (measuringRef.current) {
+        const now = performance.now()
+        if (now - lastMeasureClick.current < 300) { lastMeasureClick.current = 0; return }
+        lastMeasureClick.current = now
+        const pts = measurePts.current
+        const start = pts[0]
+        // 点回起点（≥3 点且在像素阈值内）→ 闭合成面：收尾给周长+面积。
+        if (start && pts.length >= 3) {
+          const sp = map.project([start.lon, start.lat])
+          const dx = e.point.x - sp.x
+          const dy = e.point.y - sp.y
+          if (dx * dx + dy * dy <= SNAP_PX * SNAP_PX) {
+            writeMeasurePreview(null)
+            finishClosedMeasure()
+            return
+          }
+        }
+        // 自动吸附：命中自己已画顶点（除最近一个）则落该点（含贴起点精确闭合引导），否则用点击坐标。
+        const snap = nearestPixelPt(map, e.point.x, e.point.y, ownSnapCands())
+        addMeasureVertex(snap ? snap.pt : { lon: e.lngLat.lng, lat: e.lngLat.lat })
+        return
+      }
       // 绘图工具条激活时（点/线/面/贝塞尔/选择）：点击让位给 terradraw，不做属性查询/落图钉/pick。
       if (drawingActiveRef.current) return
       const clusterHits = map.queryRenderedFeatures(e.point, { layers: [...clusterLayerIds.current] })
@@ -941,9 +1152,13 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       recordPick(map, lng, lat, [], undefined, sessionRef.current)
     })
 
-    // 右键清除图钉：移除 DOM 图钉、关闭属性浮窗，并通知 host 清掉最近一次 pick。
+    // 右键：测距中 = 丢弃本次测量；否则清除图钉/关闭属性浮窗并通知 host 清掉最近一次 pick。
     map.on('contextmenu', (e) => {
       e.originalEvent?.preventDefault()
+      if (measuringRef.current) {
+        discardMeasure()
+        return
+      }
       closePopup()
       if (markerRef.current) {
         markerRef.current.remove()
@@ -951,6 +1166,41 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       }
       clearPick(sessionRef.current)
     })
+
+    // 测量预览：移动光标把「末点→光标」画成虚线并实时刷新待加段长（有顶点才画）。
+    // 自动吸附（自己已画顶点）：≥3 点后光标靠近起点/中间顶点即贴过去并高亮，点击可精确闭合或回折。
+    map.on('mousemove', (e) => {
+      if (!measuringRef.current || measurePts.current.length === 0) return
+      const raw: Pt = { lon: e.lngLat.lng, lat: e.lngLat.lat }
+      let target = raw
+      let snapped = false
+      const cands = ownSnapCands()
+      const snap = nearestPixelPt(map, e.point.x, e.point.y, cands)
+      if (snap) { target = snap.pt; snapped = true }
+      // ≥3 点且贴近起点 → 贴起点并提示可闭合（优先于其他顶点吸附）。
+      const start = measurePts.current[0]
+      if (start && measurePts.current.length >= 3) {
+        const sp = map.project([start.lon, start.lat])
+        const dx = e.point.x - sp.x
+        const dy = e.point.y - sp.y
+        if (dx * dx + dy * dy <= SNAP_PX * SNAP_PX) { target = start; snapped = true }
+      }
+      writeMeasurePreview({ pt: target, snapped })
+    })
+    // 双击收尾（测距中）：保留结果。click 里已对 <300ms 第二记做去抖，不会多加一个点。
+    map.on('dblclick', (e) => {
+      if (!measuringRef.current) return
+      e.originalEvent?.preventDefault()
+      lastMeasureClick.current = 0
+      finishMeasure()
+    })
+    // 测距键盘：Enter 收尾保留结果，Esc 丢弃并退出测距。
+    const onMeasureKey = (e: KeyboardEvent): void => {
+      if (!measuringRef.current) return
+      if (e.key === 'Escape') { e.preventDefault(); discardMeasure() }
+      else if (e.key === 'Enter') { e.preventDefault(); finishMeasure() }
+    }
+    window.addEventListener('keydown', onMeasureKey)
 
     const onResize = () => map.resize()
     window.addEventListener('resize', onResize)
@@ -963,6 +1213,7 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     }
     return () => {
       window.removeEventListener('resize', onResize)
+      window.removeEventListener('keydown', onMeasureKey)
       resizeObserver?.disconnect()
       if (viewRefreshTimer.id) window.clearTimeout(viewRefreshTimer.id)
       deckRef.current?.dispose()
@@ -1262,6 +1513,12 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       styleRebuildPending.current = true
       try {
         ensureDataLayers(map)
+        // 测距源/层常驻：切底图整重建后补齐；有已提交顶点/进行中则还原几何与预览。
+        ensureMeasureLayers(map)
+        if (measuringRef.current || measurePts.current.length > 0) {
+          writeMeasure()
+          if (!measuringRef.current) writeMeasurePreview(null)
+        }
         gisSeen.current = {}
         clusterLayerIds.current = new Set()
         syncOverlays(map, overlaysRef.current)
@@ -1281,9 +1538,9 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     }
     const mountMap = mapRef.current
     if (mountMap) mountMap.on('style.load', () => { void rebuildAfterStyleLoad(mountMap) })
-    // ⚠️ setStyle 对「已存在样式」走 maplibre diff 路径（_diffStyle）：会移除我们加的自定义层/源，
-    // 但不触发 style.load → rebuildAfterStyleLoad 不会跑，图层永久消失（OpenFreeMap 等矢量底图切换即此 bug）。
-    // 兜底：styledata 触发时若我们的 data-points 层被清掉且本地还有图层记录，强制重建。
+    // ⚠️ 底图切换的 setStyle 已统一带 { diff: false } 强制整样式重建（见 applyBaseMap），会触发 style.load。
+    // 兜底：万一有别的路径以 diff 方式换样式（diff 不触发 style.load 且可能丢自定义层/源），
+    // styledata 触发时若我们的 data-points 层被清掉且本地还有图层记录，强制重建。
     if (mountMap) mountMap.on('styledata', () => {
       if (mountMap.getLayer('data-points') == null && Object.keys(gisSeen.current).length > 0) {
         void rebuildAfterStyleLoad(mountMap)
@@ -1458,6 +1715,14 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     <div className={styles.mapView}>
       <div ref={containerRef} className={styles.mapViewCanvas} />
       <div className={styles.mapBottomLeft}>
+        <button
+          type="button"
+          className={`${styles.measureBtn}${measuring ? ` ${styles.measureBtnActive}` : ''}`}
+          title={t('measure.titleHint')}
+          onClick={toggleMeasure}
+        >
+          {t('measure.title')}
+        </button>
         <BasemapSwitcher
           baseMap={baseMap}
           onSwitch={async (def) => {
@@ -1468,6 +1733,58 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
           t={t}
         />
       </div>
+      {(measuring || measureDone) && (
+        <div className={styles.measureReadout} role="status">
+          {measuring && (
+            <div className={styles.measureHint}>
+              {measurePts.current.length === 0 ? t('measure.hintStart') : t('measure.hintEnd')}
+            </div>
+          )}
+          {measureClosed && measurePts.current.length >= 3 ? (
+            // 闭合为面：给周长 + 面积
+            <>
+              <div className={styles.measureSegRow}>
+                {t('measure.perimeter')} <b className={styles.measureAmber}>{measurePerimeterText()}</b>
+              </div>
+              <div className={styles.measureTotal}>
+                {t('measure.area')} <b>{measureAreaText()}</b>
+              </div>
+            </>
+          ) : (
+            // 开环折线：逐段 + 累计长度（测量中带实时预览段）
+            <>
+              {measureSegs.length > 0 && (
+                <div className={styles.measureSegs}>
+                  {measureSegs.map((m, i) => (
+                    <div key={i} className={styles.measureSegRow}>
+                      {t('measure.seg', { n: i + 1 })} {formatDistance(m)}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {measureLengthText() !== '' && (
+                <div className={styles.measureTotal}>
+                  {t('measure.total')} <b>{measureLengthText()}</b>
+                  <span ref={measurePreviewEl} className={styles.measurePreview} />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {viewInfo && (
+        <div className={styles.mapViewportInfo} title={t('mapinfo.title')}>
+          <span className={styles.mapInfoItem}>
+            {t('mapinfo.zoom')} <b>{viewInfo.zoom.toFixed(1)}</b>
+          </span>
+          <span className={styles.mapInfoItem}>
+            {t('mapinfo.lng')} {fmtCoord(viewInfo.w, viewInfo.zoom)} ~ {fmtCoord(viewInfo.e, viewInfo.zoom)}
+          </span>
+          <span className={styles.mapInfoItem}>
+            {t('mapinfo.lat')} {fmtCoord(viewInfo.s, viewInfo.zoom)} ~ {fmtCoord(viewInfo.n, viewInfo.zoom)}
+          </span>
+        </div>
+      )}
       <LayerPanel
         layers={layers}
         sessionId={sessionId}

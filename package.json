@@ -1,6 +1,6 @@
 {
   "name": "dsh-webgis",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness (DSH) WebGIS Plugin: Map reading, map manipulation, and 3D world comprehension.",
   "keywords": ["dsh", "webgis", "gis", "GIS agent"],
   "license": "MIT",

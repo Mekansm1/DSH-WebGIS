@@ -9,7 +9,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+// dsh-settings 0.1.2-rc.1 起重构成 SettingsProvider，旧顶层 installSettingsSection/settingsNamespace 已移除。
+// 用 namespace 导入(而非具名)+运行时探测兼容新旧——否则任一版本缺该具名导出会直接启动期 SyntaxError。
+import * as dshSettingsModule from '@deepseek-ai/dsh-settings'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import { projectLngLatToCss, unprojectCssToLngLat } from './geo.js'
@@ -17,6 +19,7 @@ import type { VisionConfig, VisionAnalysisResult } from './vision-chain.js'
 import { analyzeScreenshotChain } from './vision-chain.js'
 import { makeResultLayer, summarize } from './geo-processing.js'
 import { registerGeoTools } from './geo-tools.js'
+import { CARTO_LIGHT_TILES } from './basemaps.js'
 import type { PostgisConfig } from './postgis.js'
 import type { DbManager } from './db-manager.js'
 import { createDbManager } from './db-manager.js'
@@ -68,7 +71,9 @@ import {
 } from './routes-misc.js'
 
 export const name = 'webgis'
-export const inject = ['tools', 'webServer', 'attachments', 'llm', 'credentials']
+// cordis 4.0.2+ 对「未在 inject 里声明的服务」有访问护栏。settings = dsh-settings 的 SettingsProvider
+// (ctx.settings)，0.1.2-rc.1 起要用 installSection 就必须显式注入；0.1.1 也提供该服务，注入无副作用。
+export const inject = ['tools', 'webServer', 'attachments', 'llm', 'credentials', 'settings']
 
 export interface Config {
   /** 底图瓦片模板 URL，支持 {z}/{x}/{y} 占位。 */
@@ -92,7 +97,7 @@ export interface Config {
   duckdb?: DuckDbOptions
 }
 export const Config: z<Config> = z.object({
-  baseTileUrl: z.string().default('https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'),
+  baseTileUrl: z.string().default(CARTO_LIGHT_TILES),
   defaultDataset: z.string().default(''),
   vision: z.object({
     provider: z.string().required(false),
@@ -242,16 +247,34 @@ export function apply(ctx: Context, config: Config): void {
   // 叠加地图服务（WMTS/WMS/XYZ）：设置卡片读写 ~/.dsh/webgis-services.json。
   const servicesFile = join(homedir(), '.dsh', 'webgis-services.json')
 
-  // 注册 settings 命名空间 `webgis`：新版 DSH 把 settings.plugin.item 声明为 keyed，
-  // 按命名空间分发插件配置卡片——不注册则配置卡片在新版上不显示。数据仍走 GUI 的 HTTP
-  // 文件；此命名空间只保证卡片可被分发，同时让 vision 也能在配置文件里配置。
+  // 注册 settings 命名空间 `webgis`：让 DSH 按命名空间分发插件配置卡片、vision 也能走配置文件。
+  // 数据仍走 GUI 的 HTTP 文件；此命名空间只保证卡片可分发。dsh-settings 0.1.2-rc.1 后 API 从顶层
+  // installSettingsSection 迁到 ctx.settings.installSection——这里运行时探测，两版都兼容。
   let configVisionSource: () => VisionConfig = () => ({})
-  installSettingsSection(ctx, settingsNamespace('webgis'), VisionSettingsSchema, config.vision ?? {}, {
-    setSource: (read) => {
-      configVisionSource = read as () => VisionConfig
+  const visionHooks = {
+    setSource: (read: () => VisionConfig): void => {
+      configVisionSource = read
     },
-    onChange: () => {},
-  })
+    onChange: (): void => {},
+  }
+  const dsSettings = dshSettingsModule as unknown as {
+    installSettingsSection?: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: unknown) => void
+    settingsNamespace?: (value: string) => string
+  }
+  const provider = (ctx as unknown as {
+    settings?: { installSection?: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: unknown) => void }
+  }).settings
+  try {
+    if (typeof dsSettings.installSettingsSection === 'function') {
+      const ns = typeof dsSettings.settingsNamespace === 'function' ? dsSettings.settingsNamespace('webgis') : 'webgis'
+      dsSettings.installSettingsSection(ctx, ns, VisionSettingsSchema, config.vision ?? {}, visionHooks)
+    } else if (provider && typeof provider.installSection === 'function') {
+      provider.installSection(ctx, 'webgis', VisionSettingsSchema, config.vision ?? {}, visionHooks)
+    }
+  } catch (err) {
+    // settings 未就绪/注册失败只影响卡片分发，不阻断插件启动。
+    ctx.logger.warn('[webgis] settings 命名空间注册跳过: %s', err instanceof Error ? err.message : String(err))
+  }
 
   // 启动时读一次持久化的 GUI 配置（失败静默，不影响插件启动）
   readFile(visionFile, 'utf8').then((raw) => {

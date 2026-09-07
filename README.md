@@ -1,8 +1,36 @@
 # dsh-webgis
 
 **A WebGIS plugin that lets LLMs truly "see" the geographic world.** Built on DeepSeek Harness (DSH), it embeds a full GIS workbench into an AI conversation: models can load map data, understand maps, and run spatial analysis through dialogue — with the ultimate goal of **genuinely understanding the 3D world**.
-
 > Read the map → Operate the map → Understand the 3D world
+
+**Author:** Frank Wang · **Feedback:** [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
+
+## What's new in 0.1.1
+
+- Fix the **"API key required" watermark** on the default Carto raster basemap.
+- Fix the **Carto vector basemaps** (Positron / Dark / Voyager) not rendering.
+- Add a **Measure** tool: line length, auto-snap to the points you have already drawn, and — when you click back on the start point — close a polygon to show its perimeter **and** area.
+- Optimize loading performance for **very large SHP** files.
+
+**Tested against DSH `0.1.2-rc1`.**
+
+Install: `npx --yes @deepseek-ai/dsh plugin --profile web add dsh-webgis`
+
+### pnpm note — DuckDB native build
+
+If install reports `[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: duckdb@1.4.4`: the plugin depends on DuckDB for huge local files, but its native binding is **not** compiled automatically when the plugin is installed (pnpm ≥ 10 blocks dependency build scripts by default).
+
+After installing, open a terminal in the profile directory (e.g. `C:\Users\Administrator\.dsh\profiles\web`), allow the build script, then rebuild:
+
+```bash
+pnpm approve-builds      # tick / confirm duckdb (double-check duckdb is selected before pressing Enter)
+pnpm rebuild duckdb
+pnpm install
+```
+
+Then confirm `node_modules\duckdb\lib\binding\duckdb.node` exists and restart DSH. Downloading the DuckDB binary needs to reach its binary host (GitHub / official CDN) — on a weak network this step can fail.
+
+
 
 ## Highlights
 
@@ -13,6 +41,7 @@
 - **🔌 Multiple data sources in one place** — PostGIS, local files, and online map services
 
 ---
+
 
 ## Quick Start
 
@@ -110,4 +139,4 @@ dsh plugin --profile web add dsh-webgis
 
 ---
 
-**Author:** Frank Wang · **Feedback:** [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
+

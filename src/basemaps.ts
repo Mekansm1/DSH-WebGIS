@@ -6,6 +6,13 @@
  * 由图源自洽 + maplibre 读瓦片内 extent 自动适配。影像底图为光栅瓦片，只换瓦片 URL。
  */
 
+/**
+ * Carto 默认光栅瓦片（light_all）真实图源。Carto 对未带 API key 的瓦片叠「API key required」水印；
+ * 用 `?key=` 传账号 key 去水印（服务端只认 `key`，`api_key`/`apikey` 会被当未知参数忽略）。
+ * ⚠️ key 属部署账号私有——发布公共 npm 前必须移出到部署配置/环境，勿随源码/产物分发。
+ */
+export const CARTO_LIGHT_TILES = 'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=cb1_2ynp_1_f4210333ac56345b838752b4'
+
 export interface BaseMapDef {
   id: string
   name: string
