@@ -1,6 +1,10 @@
 /**
- * 视觉委托链：给 webgis_get_pick 的截图分析提供「原生适配器 / 直连 HTTP(OpenAI 兼容)」
- * 双通道，末尾固定追加内置 OVH 匿名免费兜底（免 Key、开箱可用），全部失败才放弃。
+ * 视觉委托链：给 webgis_get_pick 的截图分析提供「原生适配器 / 直连 HTTP(OpenAI 兼容)」双通道，
+ * **仅走用户显式配置的后端**：主模型已具备视觉能力时整条链不会被调用（见 index.ts 的 modelSupportsImage 分流）；
+ * 只有主模型是文本模型、且用户配了视觉端点时才作为兜底通路。未配置 = 明确失败，不做任何匿名转发。
+ *
+ * ⚠️ 曾有「内置 OVH 匿名免费端点」作为最后兜底，已删除：它会把用户的地图截图默认发往第三方端点，
+ * 属于未经用户配置的外发行为，且每 IP 有严格限额、失败原因隐蔽。
  *
  * 移植自社区插件 @deepseek-ai 生态的 dsh-vision-router（MIT）：transport、失败分类、
  * 共享时间预算的写法与之同源，但裁剪为仅本插件需要的部分，未引入其熔断/图片记忆等机制。
@@ -33,18 +37,6 @@ export interface HttpVisionProvider {
   apiKeyEnv?: string
   maxTokens?: number
 }
-
-/**
- * 内置 OVH 匿名免费视觉端点（免注册、免 Key；每 IP、每模型 2 次/分钟，
- * 5 个模型独立限额，理论合计约 10 次/分钟）。作为视觉链最后的兜底。
- */
-export const OVH_FREE_PROVIDERS: HttpVisionProvider[] = [
-  { name: 'ovh', baseURL: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1', model: 'Qwen3.5-397B-A17B', apiKeyEnv: '', maxTokens: 4096 },
-  { name: 'ovh', baseURL: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1', model: 'Qwen2.5-VL-72B-Instruct', apiKeyEnv: '', maxTokens: 4096 },
-  { name: 'ovh', baseURL: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1', model: 'Qwen3.6-27B', apiKeyEnv: '', maxTokens: 4096 },
-  { name: 'ovh', baseURL: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1', model: 'Mistral-Small-3.2-24B-Instruct-2506', apiKeyEnv: '', maxTokens: 4096 },
-  { name: 'ovh', baseURL: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1', model: 'Qwen3.5-9B', apiKeyEnv: '', maxTokens: 4096 },
-]
 
 /** 一次视觉任务（整条链共享）的总时间预算。 */
 export const DEFAULT_VISION_TASK_TIMEOUT_MS = 45000
@@ -266,10 +258,10 @@ async function resolveCredentialValue(ctx: Context, apiKeyEnv: string): Promise<
 }
 
 /**
- * 走整条视觉委托链分析地图截图：
- *   1. 配置的后端：vision.baseURL 存在 → 直连 HTTP；否则 provider/model → 原生适配器；
- *   2. 内置 OVH 匿名免费兜底（freeFallback !== false 时）。
- * 整条链共享一个时间预算；每个后端失败按 taxonomy 分类，全部失败返回结构化失败结果。
+ * 走视觉委托链分析地图截图：只认用户配置的那**一个**后端 ——
+ * vision.baseURL 存在 → 直连 HTTP；否则 provider/model → DSH 原生适配器；
+ * 都没配 → 直接返回「no vision backend configured」，不外发任何请求。
+ * 失败按 taxonomy 分类，返回结构化结果（让模型知道别改措辞重试）。
  */
 export async function analyzeScreenshotChain(
   ctx: Context,
@@ -277,7 +269,6 @@ export async function analyzeScreenshotChain(
   pick: VisionPick,
   ref: ImageAttachmentRef,
   shot: VisionShot,
-  freeFallback: boolean,
 ): Promise<VisionAnalysisResult> {
   const prompt = '这是用户在地图上的截图，图中红色圆点为关注位置（点击处或图框中心；截图上无文字坐标）。'
     + `截图尺寸 ${shot.width}×${shot.height}px；图钉位于像素 (${Math.round(shot.pin.x)}, ${Math.round(shot.pin.y)})，`
@@ -325,12 +316,6 @@ export async function analyzeScreenshotChain(
   } else if (vision?.provider && vision.model) {
     // 原生适配器：provider/model 需在 DSH 里注册过 adapter。
     backends.push({ label: `${vision.provider}/${vision.model}`, run: nativeCall(vision.provider, vision.model) })
-  }
-
-  if (freeFallback) {
-    for (const provider of OVH_FREE_PROVIDERS) {
-      backends.push({ label: `${provider.name}/${provider.model}`, run: httpCall(provider) })
-    }
   }
 
   for (const backend of backends) {

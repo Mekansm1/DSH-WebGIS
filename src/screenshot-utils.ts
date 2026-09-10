@@ -7,6 +7,7 @@ import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attach
 import type { GeoViewport } from './geo.js'
 import { unprojectCssToLngLat } from './geo.js'
 import type { PickScreenshot } from './session-state.js'
+import type { GisLayer } from './geo-processing.js'
 
 /** 工具输出 canonical 值里携带的截图元信息（render 用它构造图片块与换算提示文本）。 */
 export interface ScreenshotMeta {
@@ -21,6 +22,76 @@ export interface ScreenshotMeta {
 
 /** (provider:model) → 是否支持图像输入的缓存，避免每次工具调用都解析模型。 */
 const imageCapabilityCache = new Map<string, boolean>()
+
+/** 一个可见图层在「当前画面」里的摘要。 */
+export interface LayerDigest {
+  id: string
+  name: string
+  geometryTypes: string[]
+  featureCount: number
+  /** 画面上这一层的颜色（填充色优先）——**视觉模型靠它把图上的色块对应到具体图层**，所以必须给当前值。 */
+  color: string
+  /** 当前展示方式（points/plane/hex/arc/trips/wall/radial）。 */
+  mode: string
+  bbox: number[] | null
+  /** 是否与当前视野相交（false = 图层可见但此刻不在画面内）。 */
+  inView: boolean
+  /** 大文件抽样展示时的真实总行数。 */
+  totalCount?: number
+}
+
+export interface LayerDigestResult {
+  /** 可见图层（视野内的排在前面）。隐藏图层不在图上，不列入。 */
+  items: LayerDigest[]
+  /** 可见但不在当前视野内的图层数。 */
+  offView: number
+  /** 已隐藏（不在图上）的图层数。 */
+  hidden: number
+}
+
+/** 两个 [w,s,e,n] 包围盒是否相交；任一侧缺 bbox 视为无法判断 → 交给调用方按 true 处理。 */
+function bboxOverlaps(a: number[], b: number[]): boolean {
+  return !(a[2]! < b[0]! || a[0]! > b[2]! || a[3]! < b[1]! || a[1]! > b[3]!)
+}
+
+/**
+ * 「当前图上有什么」的图层摘要：只列**可见**图层，按「视野内 → 要素多」排序，
+ * 并诚实地报出视野外与已隐藏的数量（不过滤掉、也不假装它们不存在）。
+ * bbox 缺任一（视野未知 / 空图层）时按 inView=true 处理 —— 宁可不说，也不误报"不在画面里"。
+ */
+export function layerDigest(layers: GisLayer[], view: number[] | null): LayerDigestResult {
+  const items: LayerDigest[] = []
+  let hidden = 0
+  let offView = 0
+  for (const l of layers) {
+    if (!l.visible) { hidden++; continue }
+    const bbox = l.bbox as number[] | null
+    const inView = !view || !bbox ? true : bboxOverlaps(bbox, view)
+    if (!inView) offView++
+    items.push({
+      id: l.id,
+      name: l.name,
+      geometryTypes: l.geometryTypes ?? [],
+      featureCount: l.featureCount,
+      // 填充色优先：面上看到的色块就是 fillColor（缺省才回落到整体色）
+      color: l.fillColor ?? l.color,
+      mode: l.mode,
+      bbox,
+      inView,
+      ...(l.materialized === false && l.totalCount != null ? { totalCount: l.totalCount } : {}),
+    })
+  }
+  items.sort((a, b) => (a.inView === b.inView ? b.featureCount - a.featureCount : a.inView ? -1 : 1))
+  return { items, offView, hidden }
+}
+
+/** 图层摘要 → 给模型看的一行（文本模型/视觉模型都要靠它把色块对上图层）。 */
+export function digestLine(d: LayerDigest): string {
+  const kind = d.geometryTypes.length ? d.geometryTypes.join('/') : '无几何'
+  const sampled = d.totalCount != null ? `（抽样显示，共 ${d.totalCount} 行）` : ''
+  return `${d.name}（id=${d.id}，${kind}，${d.featureCount} 个要素${sampled}，颜色 ${d.color}，展示 ${d.mode}）`
+    + (d.inView ? '' : '【不在当前视野内】')
+}
 
 /** 查询当前 agent 所用模型是否支持图像输入；未知/解析失败保守返回 false（不附截图，避免文本模型炸对话）。 */
 export async function modelSupportsImage(ctx: Context, exec: { agent?: { options?: { provider?: string; model?: string } } }): Promise<boolean> {

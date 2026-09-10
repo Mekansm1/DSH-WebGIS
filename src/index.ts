@@ -48,7 +48,8 @@ import { arrowCacheClearSession, dropLayerResources } from './arrow-cache.js'
 export { dropLayerResources } from './arrow-cache.js'
 import { headerString, isTrustedLocalRequest, jsonError, notFound } from './http-utils.js'
 import {
-  modelSupportsImage, screenshotMeta, type ScreenshotMeta,
+  digestLine, layerDigest, modelSupportsImage, screenshotMeta,
+  type LayerDigest, type ScreenshotMeta,
 } from './screenshot-utils.js'
 import { loadDataset, resolveSourceLocal } from './dataset-load.js'
 export { parseShapefileBuffer, loadShapefile, loadDataset, loadCsv, loadCsvText } from './dataset-load.js'
@@ -86,11 +87,9 @@ export interface Config {
    * - `provider`/`model`：走 DSH 原生适配器（需注册过对应 provider 的 adapter）；
    * - `baseURL`/`model`/`apiKeyEnv`：直连 OpenAI 兼容端点（`${baseURL}/chat/completions`），
    *   不依赖 DSH 适配器；`apiKeyEnv` 留空 = 免 Key 直连。
-   * 均未配置时仍会走内置 OVH 匿名免费兜底（见 freeFallback）。
+   * 仅走这里显式配置的后端：未配置时不做任何兜底转发（主模型为文本模型时只返回文本元信息）。
    */
   vision?: { provider?: string; model?: string; baseURL?: string; apiKeyEnv?: string }
-  /** 所有视觉后端都失败时，是否追加内置 OVH 匿名免费兜底（免 Key）。默认 true。 */
-  freeFallback?: boolean
   /** PostgreSQL/PostGIS 连接（AI 只读查询，结果上图）。可在插件设置卡片里配置，或在 cordis.patch.yml 里写。 */
   postgis?: PostgisConfig
   /** DuckDB 本地 CSV 引擎（大文件秒级加载/筛选）。字段说明见 DuckDbOptions。 */
@@ -105,7 +104,6 @@ export const Config: z<Config> = z.object({
     baseURL: z.string().required(false),
     apiKeyEnv: z.string().required(false),
   }).required(false),
-  freeFallback: z.boolean().default(true),
   postgis: z.object({
     host: z.string().required(false),
     port: z.number().required(false),
@@ -786,7 +784,10 @@ export function apply(ctx: Context, config: Config): void {
       + '当前视图范围 bbox（[west,south,east,north]）与截图（图中红点为点击位置）；'
       + '点击空白处则标记该点位置，features 为空。'
       + '2) 若尚无点击记录，则捕获当前地图视图（图框中心），返回中心坐标、中心命中要素、bbox 与截图。'
-      + '用户点击要素后问「刚才点的是什么/这个要素的属性」或「这里是什么地方/图框中心在哪/当前位置是什么」时调用本工具；'
+      + '两种来源都会附上当前画面上的可见图层清单 layers（名称/几何类型/要素数/颜色/展示方式/是否在视野内）——'
+      + '截图只含地图画布、不含图层列表，所以要回答「图上有什么、图斑怎么分布、某块颜色是什么图层」必须结合这份清单。'
+      + '用户点击要素后问「刚才点的是什么/这个要素的属性」，或问「当前地图上有什么/帮我看看这张图/图上都有哪些图层」'
+      + '（此时传 refresh: true 重新捕获当前视图），或问「这里是什么地方/图框中心在哪/当前位置是什么」时调用本工具；'
       + '已有 features 时直接读其属性回答（如名称/面积/地址），无需重查数据库。'
       + 'webgis_navigate / webgis_load_dataset 会自动使上次点击记录失效，因此导航后再调用'
       + '会捕获导航后的新视图，无需额外参数；仅当用户手动拖动/缩放地图后（无 navigate 调用）才需要传 refresh: true；'
@@ -805,6 +806,7 @@ export function apply(ctx: Context, config: Config): void {
           latitude: { type: 'number' },
           bbox: { type: 'json' },
           features: { type: 'json' },
+          layers: { type: 'json' },
           screenshot: { type: 'json' },
           attachImage: { type: 'boolean' },
           vision: { type: 'string' },
@@ -819,6 +821,7 @@ export function apply(ctx: Context, config: Config): void {
           longitude?: number
           latitude?: number
           features?: unknown
+          layers?: LayerDigest[]
           screenshot?: ScreenshotMeta | null
           attachImage?: boolean
           vision?: string
@@ -834,16 +837,22 @@ export function apply(ctx: Context, config: Config): void {
         const ext = shot.extent
         const range = `截图覆盖范围：经度 ${ext.west.toFixed(4)}~${ext.east.toFixed(4)}，纬度 ${ext.south.toFixed(4)}~${ext.north.toFixed(4)}。`
         const head = `地图截图已生成（${shot.width}×${shot.height}px）。红点即关注位置（点击处或图框中心），位于截图像素 ${pin}，对应 ${ll}。${range}${feat}。`
+        const items = v.layers ?? []
+        const layersText = items.length > 0
+          ? `当前画面上的可见图层（按「视野内、要素多」排序）：\n`
+            + items.map((l) => `- ${digestLine(l)}`).join('\n')
+          : '当前画面上没有可见图层。'
         const conv = '如需把截图里任意像素换算为经纬度，调用 webgis_unproject({ x, y })；经纬度→截图像素用 webgis_project({ longitude, latitude })（原点均为截图左上角，x 向右 y 向下）。'
+        const body = `${head}\n${layersText}\n${conv}`
         if (!v.attachImage) {
           const visionText = v.vision
             ? `\n视觉模型分析：${v.vision}`
             : v.visionNote
               ? `\n${v.visionNote}`
               : ' 当前模型不支持图像输入，截图未附上；接入视觉模型后即可直接看图。'
-          return text(head + visionText + conv)
+          return text(body + visionText)
         }
-        return [{ type: 'image', attachment: shot.ref } as ContentBlock, ...text(head + conv)]
+        return [{ type: 'image', attachment: shot.ref } as ContentBlock, ...text(body)]
       },
     },
     async execute(args, exec) {
@@ -861,14 +870,17 @@ export function apply(ctx: Context, config: Config): void {
       const shotRef = pick.screenshot?.ref ?? null
       // 视图范围 bbox：截图那一刻的地图覆盖范围（截图缺失时为 null）。
       const bbox = shot ? [shot.extent.west, shot.extent.south, shot.extent.east, shot.extent.north] : null
+      // 当前画面上的图层摘要：截图只有 WebGL canvas（不含 DOM 图层列表/标注），
+      // 「图上有什么」只能靠这份文本元信息扛；颜色字段是把图上色块对应到图层的关键。
+      const digest = layerDigest(st.layers, bbox)
       const mainSupportsImage = shot ? await modelSupportsImage(ctx, exec) : false
-      // 主模型文本、有截图 → 走视觉委托链看图并返回文字分析。即便没配置视觉模型，
-      // 也走内置 OVH 免费兜底（freeFallback 默认开）；全部失败给结构化原因（不让模型重试）。
+      // 主模型文本、有截图 → 若用户配了视觉端点，委托它看图并返回文字分析；
+      // 没配则该工具只回文本元信息（bbox/图层/命中要素），不做任何匿名兜底转发。
       let vision = ''
       let visionNote = ''
       if (shot && shotRef && !mainSupportsImage) {
         const result: VisionAnalysisResult = await analyzeScreenshotChain(
-          ctx, effectiveVision(), pick, shotRef, shot, config.freeFallback !== false)
+          ctx, effectiveVision(), pick, shotRef, shot)
         if (result.ok && result.text) {
           vision = result.text
         } else if (result.attempted.length > 0) {
@@ -882,6 +894,7 @@ export function apply(ctx: Context, config: Config): void {
         latitude: pick.lat,
         bbox: bbox as unknown as JsonValue,
         features: pick.features as unknown as JsonValue,
+        layers: digest.items as unknown as JsonValue,
         screenshot: shot as unknown as JsonValue,
         attachImage: mainSupportsImage,
         vision,
@@ -906,7 +919,10 @@ export function apply(ctx: Context, config: Config): void {
     description:
       '将经纬度坐标转换为最近一次地图截图图像中的像素位置。截图是用户点击时截取的地图模块图像，'
       + '像素原点在图像左上角，x 向右、y 向下（0 ≤ x < width，0 ≤ y < height）。'
-      + '当需要把某个地理坐标定位/标注到截图图像上时调用；需先存在地图点击截图（见 webgis_get_pick）。',
+      + '当需要把某个地理坐标定位/标注到截图图像上时调用；需先存在地图点击截图（见 webgis_get_pick）。'
+      + '返回的像素只对本工具链（webgis_get_pick / unproject）里那张截图有效：'
+      + '要放到**别的尺寸的图**（如用户提供的 PNG）上，需再按两张图的尺寸比换算，'
+      + '并用几何地标验证 —— 不要用地图文字标注定标（标注按像素渲染且做碰撞剔除，不随几何缩放）。',
     parameters: {
       longitude: { type: 'number', required: true, description: '经度，-180~180' },
       latitude: { type: 'number', required: true, description: '纬度，-90~90' },
@@ -952,7 +968,13 @@ export function apply(ctx: Context, config: Config): void {
     description:
       '将最近一次地图截图图像中的像素坐标换算为经纬度。截图是用户点击时截取的地图模块图像，'
       + '像素原点在图像左上角，x 向右、y 向下。'
-      + '当需要确定截图里某个像素/区域对应的地理位置时调用；需先存在地图点击截图（见 webgis_get_pick）。',
+      + '当需要确定截图里某个像素/区域对应的地理位置时调用；需先存在地图点击截图（见 webgis_get_pick）。'
+      + '【换算纪律】① 只对 webgis_get_pick 本次返回的那张截图有效（像素坐标请以返回的 width/height 为准）；'
+      + '② 需要的是**图像像素**，若你手上是别的尺寸的图（如用户提供的 PNG），先按尺寸比换算到本截图的像素，'
+      + '且**必须用几何地标（水体/道路/建筑等形状特征）验证**比例与偏移都对得上；'
+      + '③ **不要用地图上的文字标注来对两张图定标** —— 标注由样式引擎按像素渲染并做碰撞剔除，'
+      + '不同像素尺寸/瓦片层级下位置和取舍都会变，拿来当基准会得出错误结论；'
+      + '④ 用户给的外部图片若无法与本次截图对齐，就如实说明无法换算，不要硬猜坐标。',
     parameters: {
       x: { type: 'number', required: true, description: '截图像素 x，0 ≤ x < width' },
       y: { type: 'number', required: true, description: '截图像素 y，0 ≤ y < height' },
