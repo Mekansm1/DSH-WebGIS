@@ -19,7 +19,11 @@ import { makeGeoArrowLayers, makeRawGeojsonLayers, type GeoArrowSpec } from '../
 import { tableFromIPC, type Table } from 'apache-arrow'
 import { arrowCountForZoom, nextArrowCount } from '../../render-policy.js'
 import { sessionUrl } from '../sessionUrl.js'
-import { bboxContains, bboxStr, COVER_MARGIN_DEG, FETCH_PAD, fromBboxStr, paddedBbox, shouldViewportCull, type Bbox } from './viewport.js'
+import { type Bbox } from './viewport.js'
+import {
+  autoRetryEligible, decideRawSync, RawLayerRuntime, RAW_RETRY_DELAY_MS, windowFromBbox,
+  type RawSyncDecision,
+} from './raw-runtime.js'
 import type { LayerSummary } from '../gis-types.js'
 import type { FeatureCollection } from 'geojson'
 import type { Map as MapLibreMap } from 'maplibre-gl'
@@ -50,17 +54,6 @@ export interface DeckPickHit {
  * React 渲染顺序，也让「map 引用」只存在于运行时、不进 deck chunk 的静态图。
  */
 
-/** 单层 raw 取数决策（决定后交给 applyRawSync 执行；consume 的 key 恒为 `${tier}|`，由 apply 重建）。 */
-type RawSyncDecision =
-  | { kind: 'skip' } // 覆盖命中 / 同键去重 / 已在途 → 渲染层不动
-  | { kind: 'consume' } // 旧全档位命中预取缓存 → 直接换档
-  | { kind: 'fetch'; bbox: string | null } // bbox=null=旧全档位；否则为视口 bbox 参数
-
-/** 失败空闲重试延迟：一次 arrow fetch 失败且无尾随合并/在途/待重试时，延迟这么久补拉一次最新视野（解决「停下不渲染」）。 */
-const RAW_RETRY_DELAY_MS = 800
-/** 失败空闲重试冷却：距上次自动重试不足此时长则不再自动重试（防死循环；用户手动平移/缩放触发的正常决策不走这里、不受冷却限制）。 */
-const RAW_RETRY_MIN_INTERVAL_MS = 1500
-
 export class DeckController {
   private readonly host: DeckControllerHost
   /** maplibre map（MapView 建图后 setMap 注入；ensureOverlay/syncRawTiers/upsertRaw 需要）。 */
@@ -71,30 +64,13 @@ export class DeckController {
   private deckRegistry: Record<string, DeckChartSpec> = {}
   /** deck 图层缓存：图层 id → 已构造的 deck 层实例（同步时整体下发，避免每帧重建）。 */
   private deckLayerCache: Record<string, DeckLayer[]> = {}
-  /** deck 原始数据路径注册表：图层 id → raw spec（>10 万点图层走 deck 原始点，非 deck 特效模式）。 */
-  private rawDeckRegistry: Record<string, GeoArrowSpec> = {}
-  /** deck 原始数据路径的 Arrow 表缓存（可见性切换/样式重建时免重新拉二进制）。 */
-  private rawTableCache: Record<string, Table> = {}
-  /** raw arrow 图层当前渲染的分档（zoom 分级密度：max 抽样条数；成功才更新）。 */
-  private rawTiers: Record<string, number> = {}
-  /** 正在拉取的「视野键」（id → `${tier}|${bbox}`；同层同一时刻至多一个在途：同键在途去重，异键在途走 pendingRaw 尾随合并，不并发起第二个请求）。 */
-  private rawFetching: Record<string, string> = {}
-  /** 已成功渲染/在途的「视野键」（id → `${tier}|${bbox}`；bbox 为空 = 无视野全量路径）。 */
-  private lastViewKey: Record<string, string> = {}
-  /** 尾随合并队列：id → 在途请求期间被「不同键决策」跳过的最新视野键。在途请求结束（成功/失败）后据此补拉一次最新；
-   *  新的不同键决策会覆盖旧 pending，保证同层同一时刻至多一个在途 + 一个待补拉。 */
-  private pendingRaw: Record<string, string> = {}
-  /** 失败空闲重试冷却：id → 上次**实际执行**自动重试的时刻（setTimeout 回调开头写）；距它 <1500ms 不再自动重试。 */
-  private lastAutoRetryAt: Record<string, number> = {}
-  /** 失败空闲重试的定时器句柄（id → setTimeout id）；removeOut/clearRaw/dispose 时取清除，防残留定时器回调污染已清理图层。 */
-  private rawRetryTimers: Record<string, number> = {}
+  /** raw 原始数据路径（>10 万点/arrow 大文件）各层的运行时状态：id → RawLayerRuntime。
+   *  收敛原先散落的 rawDeckRegistry/rawTableCache/rawTiers/rawFetching/lastViewKey/pendingRaw/
+   *  lastAutoRetryAt/rawRetryTimers/windowOf/rawPrefetchCache/rawManaged——删除/清理只需删这一个条目。 */
+  private raw: Map<string, RawLayerRuntime> = new Map()
   /** 最近一次收到的图层摘要列表（refreshRawLayers/syncRawTiers/viewportRefresh/upsertRaw 时更新）。
    *  尾随补拉 / 失败空闲重试据此取「该层最新摘要」重新决策，避免用发起请求时的陈旧闭包。 */
   private lastLayers: LayerSummary[] = []
-  /** 视口裁剪各层最近一次**成功拉到**的取数窗口与其 tier（id → 窗口；覆盖率跳过：小平移/同档位缩放仍在窗口内 → 不重拉）。 */
-  private windowOf: Record<string, { tier: number; bb: Bbox } | null> = {}
-  /** 预取预热缓存：id → tier → 已提前拉好的表（后台拉下一档，跨档位时免等待；仅无 bbox 路径用）。 */
-  private rawPrefetchCache: Record<string, Record<number, Table>> = {}
   /** 轨迹动画已流逝时间（秒，**不取模**持续累加——相位在 tripsProgress 里乘 speed 后再取模，
    *  这样相位能真正走到 1、头点到达终点才回绕；若在这里 %1，相位上限会被压成 speed，头点走不到终点）。 */
   private tripsTime = 0
@@ -113,6 +89,21 @@ export class DeckController {
   private warn(msg: string, ...args: unknown[]): void {
     if (this.host.onError) this.host.onError(msg, ...args)
     else console.warn(msg, ...args)
+  }
+
+  /** 取（或懒建）某 id 的 raw 运行时。仅在「主动管理该层」的写路径调用，避免只读检查误建空条目。 */
+  private rawOf(id: string): RawLayerRuntime {
+    let rt = this.raw.get(id)
+    if (!rt) {
+      rt = new RawLayerRuntime(id)
+      this.raw.set(id, rt)
+    }
+    return rt
+  }
+
+  /** 只读取某 id 的 raw 运行时（不存在返回 undefined；只读检查用，不误建）。 */
+  private rawGet(id: string): RawLayerRuntime | undefined {
+    return this.raw.get(id)
   }
 
   // ---- deck 出图（arc/trips/wall/radial 特效） ----
@@ -162,33 +153,22 @@ export class DeckController {
   /** 移除一个 deck 出图层（模式切回 maplibre / 图层删除）。同时清掉 raw 三件套与 raw 运行期取数状态
    *  （尾随合并 / 失败重试定时器 / 在途），语义与原 removeDeckLayer 一致。 */
   removeOut(id: string): void {
-    const hasRawRuntime = this.rawFetching[id] != null || this.pendingRaw[id] != null
-      || this.rawRetryTimers[id] != null || this.lastAutoRetryAt[id] != null
-    if (!this.deckRegistry[id] && !this.deckLayerCache[id] && !this.rawDeckRegistry[id] && !hasRawRuntime) return
+    const rt = this.rawGet(id)
+    if (!this.deckRegistry[id] && !this.deckLayerCache[id] && rt?.spec == null
+      && !(rt?.hasRuntime() ?? false) && !(rt?.managed ?? false)) return
     delete this.deckRegistry[id]
     delete this.deckLayerCache[id]
-    delete this.rawDeckRegistry[id]
-    delete this.rawTableCache[id]
-    delete this.rawPrefetchCache[id]
-    delete this.rawTiers[id]
-    delete this.rawFetching[id]
-    delete this.lastViewKey[id]
-    delete this.windowOf[id]
-    this.clearRawRuntime(id)
+    if (rt) rt.clearRetryTimer()
+    this.raw.delete(id)
     this.syncLayers()
   }
 
   /** 清掉某 id 的「deck 原始数据路径」（arrow/geojson）注册表与表缓存：切到 deck 出图 / maplibre 形态前调用，
    *  避免 syncRawTiers/rebuild 把旧形态画回去。 */
   clearRaw(id: string): void {
-    delete this.rawDeckRegistry[id]
-    delete this.rawTableCache[id]
-    delete this.rawPrefetchCache[id]
-    delete this.rawTiers[id]
-    delete this.rawFetching[id]
-    delete this.lastViewKey[id]
-    delete this.windowOf[id]
-    this.clearRawRuntime(id)
+    const rt = this.rawGet(id)
+    if (rt) rt.clearRetryTimer()
+    this.raw.delete(id)
   }
 
   /** 清掉某 id 的「deck 出图」注册表（arc/trips/wall/radial）：切到 raw / maplibre 形态前调用，
@@ -206,29 +186,31 @@ export class DeckController {
 
   /** deck 原始数据路径注册表里某 id 的当前可见性（无注册返回 undefined；供 MapView 判断「只有变化才重建」）。 */
   rawVisibleOf(id: string): boolean | undefined {
-    return this.rawDeckRegistry[id]?.visible
+    return this.rawGet(id)?.spec?.visible
   }
 
   /** 该 id 是否已注册 raw 原始数据路径（MapView 据此决定 rebuild vs upsert）。 */
   hasRaw(id: string): boolean {
-    return !!this.rawDeckRegistry[id]
+    return this.rawGet(id)?.spec != null
   }
 
   /** raw arrow 图层当前缓存表（点选属性回查用；无表返回 null）。 */
   arrowTableFor(id: string): Table | null {
-    return this.rawTableCache[id] ?? null
+    return this.rawGet(id)?.table ?? null
   }
 
   /** 后台预取下一档（zoom 放大临近阈值时数据提前备好，跨档免等待；失败忽略）。仅无 bbox 全量路径使用。 */
   private prefetchRawNext(id: string, totalCount: number, tier: number): void {
     const next = nextArrowCount(tier, totalCount)
-    if (next == null || this.rawPrefetchCache[id]?.[next]) return
+    const rt = this.rawGet(id)
+    if (next == null || rt?.prefetch[next]) return
     void (async () => {
       try {
         const res = await fetch(sessionUrl(this.host.getSessionId(), `/webgis/arrow?id=${encodeURIComponent(id)}&max=${next}`), { cache: 'no-store' })
         if (res.ok) {
           const t = tableFromIPC(new Uint8Array(await res.arrayBuffer()))
-          ;(this.rawPrefetchCache[id] ??= {})[next] = t
+          const r = this.rawGet(id)
+          if (r) r.prefetch[next] = t
         }
       } catch {
         // 预取失败忽略（下次跨档再拉）
@@ -249,21 +231,6 @@ export class DeckController {
     }
   }
 
-  /** LayerSummary.bbox（[w,s,e,n] 元组）转 Bbox；缺失 / 非有限返回 null（按「无 bbox」处理）。 */
-  private layerBboxOf(s: LayerSummary): Bbox | null {
-    const b = s.bbox
-    if (!b || b.length !== 4) return null
-    const [west, south, east, north] = b
-    if (![west, south, east, north].every((v) => typeof v === 'number' && Number.isFinite(v))) return null
-    return { west, south, east, north }
-  }
-
-  /** 收益门控：true = 本层值得走视口裁剪；false = 走旧全档位（bbox=null，与 v1 之前一致）。
-   *  有层 bbox 时看 view/layer 面积比 < 0.55；无 bbox（极少数）且 zoom ≥ 15 才裁剪，否则保守全档位。 */
-  private shouldCull(s: LayerSummary, view: Bbox, zoom: number): boolean {
-    return shouldViewportCull(view, this.layerBboxOf(s), zoom)
-  }
-
   /** 按「档位 + 当前视野」拉取 arrow 表并下发（zoom 分级密度 + 视口裁剪）：成功替换图层缓存并 sync，返回 true；
    *  失败不动旧图层，返回 false。同层**串行**：同键在途去重直接返回；异键在途不再并发起第二个请求，把新键记入
    *  pendingRaw 做**尾随合并**（本请求结束后的 finally 里补拉最新一次），调用方照旧视为「当前未就绪」即可。
@@ -271,47 +238,48 @@ export class DeckController {
    *  下一档（视野会变，预取价值低）；无 bbox 全量路径保留预取。 */
   private async fetchRawArrow(s: LayerSummary, spec: GeoArrowSpec, tier: number, bbox: string | null): Promise<boolean> {
     const id = s.id
+    const rt = this.rawOf(id)
     const key = `${tier}|${bbox ?? ''}`
-    const inFlight = this.rawFetching[id]
+    const inFlight = rt.fetching
     if (inFlight != null) {
       // 同层已有在途请求（同键去重 / 异键尾随合并）：都不新起第二个请求。
       if (inFlight === key) return false // 同键在途去重（保持既有）
-      this.pendingRaw[id] = key // 异键在途 → 只记入尾随合并队列，等当前请求结束再补拉最新
+      rt.pending = key // 异键在途 → 只记入尾随合并队列，等当前请求结束再补拉最新
       return false
     }
-    this.rawFetching[id] = key
+    rt.fetching = key
     let failed = false
     try {
       const q = bbox ? `&bbox=${bbox}` : ''
       const res = await fetch(sessionUrl(this.host.getSessionId(), `/webgis/arrow?id=${encodeURIComponent(id)}&max=${tier}${q}`), { cache: 'no-store' })
       if (!res.ok) throw new Error(`status ${res.status}`)
       const table = tableFromIPC(new Uint8Array(await res.arrayBuffer()))
-      if (this.rawFetching[id] !== key) return false // 已被清理/取代，丢弃陈旧结果
-      this.rawTableCache[id] = table
-      this.rawTiers[id] = tier
-      this.lastViewKey[id] = key
+      if (rt.fetching !== key) return false // 已被清理/取代，丢弃陈旧结果
+      rt.table = table
+      rt.tier = tier
+      rt.lastViewKey = key
+      rt.spec = spec
       this.deckLayerCache[id] = makeGeoArrowLayers(spec, table)
-      this.rawDeckRegistry[id] = spec
       this.syncLayers()
       if (!bbox) this.prefetchRawNext(id, s.totalCount ?? 0, tier)
       return true
     } catch (err) {
       failed = true
-      if (this.rawFetching[id] === key) this.warn('[MapView] Arrow 分档拉取失败', id, tier, err)
+      if (rt.fetching === key) this.warn('[MapView] Arrow 分档拉取失败', id, tier, err)
       return false
     } finally {
       // 收尾只属于「本请求仍是该层当前在途（owner）」的请求；已被取代/清理的陈旧请求在此静默退出，
       // 由取代它的请求（或 removeOut/clearRaw 的清理）统一负责后续，避免在串行之外再堆叠。
-      const wasOwner = this.rawFetching[id] === key
-      if (wasOwner) delete this.rawFetching[id]
+      const wasOwner = rt.fetching === key
+      if (wasOwner) rt.fetching = null
       if (wasOwner) {
-        const pendingKey = this.pendingRaw[id]
+        const pendingKey = rt.pending
         if (pendingKey != null) {
-          delete this.pendingRaw[id]
+          rt.pending = null
           // 尾随合并：pending 与「当前已渲染键」不同才补拉（用 lastLayers 最新摘要重算，不走陈旧闭包）；
           // pending 与同键在途已被入口短路，故此处只需跟 lastViewKey 比。有 pending 即视为本次已由补拉接管，
           // 即使本请求失败也不再额外安排空闲重试（补拉若再失败，由补拉自己的 finally 处理）。
-          if (pendingKey !== this.lastViewKey[id]) this.pullLatestRawLayer(id)
+          if (pendingKey !== rt.lastViewKey) this.pullLatestRawLayer(id)
         } else if (failed) {
           // 失败且无 pending / 无在途 → 空闲单次重试（内部再做 raw arrow 层校验与冷却），解决「停下不渲染」。
           this.scheduleRawAutoRetry(id)
@@ -336,13 +304,18 @@ export class DeckController {
    *  Arrow 拉取失败回退 geojson 原始点（arrow 图层此前不拉 geojson，失败时补拉抽样兜底）；图层实例缓存进 deckLayerCache。 */
   async upsertRaw(s: LayerSummary, geojson: FeatureCollection | null): Promise<void> {
     this.rememberLayer(s) // 记录该层最新摘要：后续尾随补拉/失败空闲重试据此找该层（而非陈旧闭包）
+    // 先登记「raw 管理意图」再拉数据：spec（=已出数据）在首次 Arrow 失败且 geojson 兜底也没有时会一直为空，
+    // 若 retry/refresh 都只看 spec，首拉失败就永远不自愈；managed 让「失败空闲重试」与「pan/zoom 重触发」都生效。
+    // removeOut/clearRaw/dispose 会删除整条 runtime——图层被删/切形态后不再重试/重拉。
+    const rt = this.rawOf(s.id)
+    rt.managed = true
     const spec = this.rawArrowSpec(s)
     let fc = geojson
     if (s.dataFormat === 'arrow') {
       const zoom = this.map?.getZoom() ?? 0
       if (!(await this.syncRawLayer(s, zoom, false, true))) {
         // 兜底渲染的是全量抽样 geojson（不再是某视野窗口的 arrow），清掉窗口避免后续覆盖跳过误判
-        this.windowOf[s.id] = null
+        rt.window = null
         // Arrow 失败兜底：补拉抽样 geojson（进 MapView dataCache，颜色/可见性 rebuild 也能复用）
         if (!fc) {
           try {
@@ -359,58 +332,25 @@ export class DeckController {
     }
     if (fc) {
       this.deckLayerCache[s.id] = makeRawGeojsonLayers(spec, fc)
-      this.rawDeckRegistry[s.id] = spec
+      rt.spec = spec
       this.syncLayers()
     }
   }
 
-  /** 统一取数决策（幂等）：先判「视口裁剪 vs 旧全档位」门控，再在各自路径内做去重 / 覆盖率跳过。
-   *  force=true 时忽略覆盖/同键去重（仅首拉/数据变更用；fetchRawArrow 内在途同键仍去重）。
-   *  副作用：旧全档位路径会把该层 windowOf 清掉（回到全局抽样/缓存模型）。 */
-  private decideRawSync(
-    s: LayerSummary,
-    tier: number,
-    zoom: number,
-    view: Bbox | null,
-    allowPrefetchConsume: boolean,
-    force: boolean,
-  ): RawSyncDecision {
-    const id = s.id
-    // 视口门控：view 存在且 shouldCull 才裁剪；否则旧全档位（bbox=null，与 v1 之前行为一致）。
-    const gated = view != null && this.shouldCull(s, view, zoom)
-    if (!gated) {
-      if (this.windowOf[id] != null) this.windowOf[id] = null
-      const key = `${tier}|`
-      if (!force && (this.lastViewKey[id] === key || this.rawFetching[id] === key)) return { kind: 'skip' }
-      if (!force && allowPrefetchConsume && this.rawPrefetchCache[id]?.[tier]) return { kind: 'consume' }
-      return { kind: 'fetch', bbox: null }
-    }
-    // 视口裁剪路径：取数窗口 = 当前视野按 FETCH_PAD 外扩（减少后续平移重拉）。
-    const need = paddedBbox(view, FETCH_PAD)
-    const w = this.windowOf[id]
-    // 覆盖率跳过：同 tier 且当前视野仍在上次成功拉到的窗口内 → 本层跳过（渲染层不动，零请求零替换）。
-    // ⚠️ 与草案差异：比较的是**当前视野 view**而非再外扩的 need——若比较 need（与窗口等宽），任何平移都必然越界、永远跳不过；
-    //    窗口本身已比 view 大 25%，view 在窗口内即代表可视区数据已就绪（平移 ≤25% 屏宽不重拉）。
-    if (!force && w && w.tier === tier && bboxContains(w.bb, view, COVER_MARGIN_DEG)) return { kind: 'skip' }
-    const bbox = bboxStr(need)
-    const key = `${tier}|${bbox}`
-    if (!force && (this.lastViewKey[id] === key || this.rawFetching[id] === key)) return { kind: 'skip' }
-    return { kind: 'fetch', bbox }
-  }
-
   /** 依决策执行（fetch / 预取换档 / skip）；返回是否已具备有效渲染数据。
-   *  fetch 失败保持旧渲染层与 windowOf 不变并返回 false（由调用方决定兜底）。 */
+   *  fetch 失败保持旧渲染层与 window 不变并返回 false（由调用方决定兜底）。 */
   private async applyRawSync(s: LayerSummary, spec: GeoArrowSpec, tier: number, d: RawSyncDecision): Promise<boolean> {
     if (d.kind === 'skip') return true
+    const rt = this.rawOf(s.id)
     if (d.kind === 'consume') {
-      const prefetched = this.rawPrefetchCache[s.id]?.[tier]
+      const prefetched = rt.prefetch[tier]
       if (!prefetched) return true
-      delete this.rawPrefetchCache[s.id]?.[tier]
-      this.rawTableCache[s.id] = prefetched
-      this.rawTiers[s.id] = tier
-      this.lastViewKey[s.id] = `${tier}|`
+      delete rt.prefetch[tier]
+      rt.table = prefetched
+      rt.tier = tier
+      rt.lastViewKey = `${tier}|`
+      rt.spec = spec
       this.deckLayerCache[s.id] = makeGeoArrowLayers(spec, prefetched)
-      this.rawDeckRegistry[s.id] = spec
       this.syncLayers()
       this.prefetchRawNext(s.id, s.totalCount ?? 0, tier)
       return true
@@ -418,7 +358,7 @@ export class DeckController {
     const ok = await this.fetchRawArrow(s, spec, tier, d.bbox)
     if (ok && d.bbox != null) {
       // 记录本次成功拉到的取数窗口（bbox 即 need 的 3 位小数序列化；覆盖判定带 COVER_MARGIN_DEG 补偿舍入）
-      this.windowOf[s.id] = { tier, bb: fromBboxStr(d.bbox) }
+      rt.window = windowFromBbox(d.bbox, tier)
     }
     return ok
   }
@@ -430,7 +370,7 @@ export class DeckController {
     const spec = this.rawArrowSpec(s)
     const tier = arrowCountForZoom(zoom, s.totalCount ?? 0)
     const view = this.currentViewBbox()
-    const d = this.decideRawSync(s, tier, zoom, view, allowPrefetchConsume, force)
+    const d = decideRawSync(this.rawOf(s.id), s, tier, zoom, view, allowPrefetchConsume, force)
     return this.applyRawSync(s, spec, tier, d)
   }
 
@@ -442,12 +382,13 @@ export class DeckController {
   }
 
   /** 用 lastLayers 里该层**最新**摘要重走一次统一取数核心（不强制、不走预取换档）：尾随合并补拉 / 失败空闲重试共用入口。
-   *  图层已不在 lastLayers / 已非 raw arrow / 已不在 rawDeckRegistry（图层被删/切形态）→ 忽略。 */
+   *  图层已不在 lastLayers / 已非 raw arrow / 已不在 raw 管理态（图层被删/切形态）→ 忽略。 */
   private pullLatestRawLayer(id: string): boolean {
-    if (this.rawFetching[id]) return false // 已有在途（含刚被其它路径启动的），避免在串行之外再堆叠
+    const rt = this.rawOf(id)
+    if (rt.fetching) return false // 已有在途（含刚被其它路径启动的），避免在串行之外再堆叠
     const s = this.lastLayers.find((l) => l.id === id)
     if (!s || s.dataFormat !== 'arrow' || s.renderer !== 'deck') return false
-    if (!this.rawDeckRegistry[id]) return false
+    if (!rt.managed) return false // 不再要求已出数据：首拉失败（spec 空）也要允许重试
     const zoom = this.map?.getZoom() ?? 0
     void this.syncRawLayer(s, zoom, false)
     return true
@@ -456,41 +397,29 @@ export class DeckController {
   /** 失败空闲重试：一次 fetch 失败且无尾随合并接管时，延迟 ~800ms 用最新摘要补拉一次（解决「停下不渲染直至再平移」）。
    *  冷却：距上次**实际执行**的自动重试 <1500ms 不再自动重试；用户手动平移/缩放触发的正常决策不走这里、不受冷却限制。 */
   private scheduleRawAutoRetry(id: string): void {
-    if (this.rawFetching[id]) return // 已有在途（含刚被尾随补拉启动的），无需再排
-    if (this.pendingRaw[id] != null) return // 已有待尾随合并的键
-    if (this.rawRetryTimers[id] != null) return // 已有一个未触发的重试定时器
-    if (Date.now() - (this.lastAutoRetryAt[id] ?? 0) < RAW_RETRY_MIN_INTERVAL_MS) return
     const s = this.lastLayers.find((l) => l.id === id)
     if (!s || s.dataFormat !== 'arrow' || s.renderer !== 'deck') return
-    if (!this.rawDeckRegistry[id]) return
-    this.rawRetryTimers[id] = window.setTimeout(() => {
-      if (this.rawRetryTimers[id] != null) delete this.rawRetryTimers[id]
-      this.lastAutoRetryAt[id] = Date.now() // 实际执行时刻计入冷却，慢失败也不会死循环
+    const rt = this.rawOf(id)
+    if (!autoRetryEligible(rt, Date.now())) return // 在途 / 待合并 / 已有定时器 / 冷却中 / 非管理态
+    rt.retryTimer = window.setTimeout(() => {
+      rt.retryTimer = null
+      rt.lastAutoRetryAt = Date.now() // 实际执行时刻计入冷却，慢失败也不会死循环
       this.pullLatestRawLayer(id)
     }, RAW_RETRY_DELAY_MS)
   }
 
-  /** 清掉某 id 的 raw 运行期取数状态（尾随合并 / 冷却 / 未触发定时器），供 removeOut / clearRaw / dispose 复用。 */
-  private clearRawRuntime(id: string): void {
-    delete this.pendingRaw[id]
-    delete this.lastAutoRetryAt[id]
-    const t = this.rawRetryTimers[id]
-    if (t != null) {
-      window.clearTimeout(t)
-      delete this.rawRetryTimers[id]
-    }
-  }
-
   /** 统一刷新入口：遍历 raw arrow 层按「当前 zoom 档 + 视野」逐层取数。
    *  zoomend 驱动的 syncRawTiers 与 moveend 防抖驱动的 viewportRefresh 都汇到这里；去重由
-   *  decideRawSync 的 lastViewKey / rawFetching / windowOf 覆盖判定兜底，同键/窗口内不再重复拉。 */
+   *  decideRawSync 的 lastViewKey / fetching / window 覆盖判定兜底，同键/窗口内不再重复拉。 */
   private refreshRawLayers(layers: LayerSummary[], allowPrefetchConsume: boolean): void {
     this.lastLayers = layers // 记录最新摘要：尾随补拉 / 失败空闲重试按它找该层最新摘要（而非陈旧闭包）
     const map = this.map
     if (!map) return
     const zoom = map.getZoom()
-    for (const id of Object.keys(this.rawDeckRegistry)) {
-      const s = layers.find((l) => l.id === id)
+    // 遍历「raw 管理意图」而非已出数据：首次失败后 spec 为空的层（从未出过数据）平移/缩放也能重新触发拉取。
+    for (const rt of this.raw.values()) {
+      if (!rt.managed) continue
+      const s = layers.find((l) => l.id === rt.id)
       if (!s || s.dataFormat !== 'arrow' || s.renderer !== 'deck') continue
       void this.syncRawLayer(s, zoom, allowPrefetchConsume)
     }
@@ -509,14 +438,15 @@ export class DeckController {
 
   /** 重建 raw deck 图层（可见性/颜色变更时用缓存数据，避免重新拉取）。geojson 从 host.getCachedData 读（与 dataCache 同一份）。 */
   rebuildRaw(s: LayerSummary): void {
-    const existing = this.rawDeckRegistry[s.id]
-    if (!existing) return
+    const rt = this.rawGet(s.id)
+    const existing = rt?.spec
+    if (!rt || !existing) return
     const spec = { ...existing, ...this.rawArrowSpec(s) }
-    const table = this.rawTableCache[s.id]
+    const table = rt.table
     const geojson = this.host.getCachedData?.(s.id)
     if (table) this.deckLayerCache[s.id] = makeGeoArrowLayers(spec, table)
     else if (geojson) this.deckLayerCache[s.id] = makeRawGeojsonLayers(spec, geojson)
-    this.rawDeckRegistry[s.id] = spec
+    rt.spec = spec
     this.syncLayers()
   }
 
@@ -567,9 +497,8 @@ export class DeckController {
   dispose(): void {
     if (this.tripsRaf != null) cancelAnimationFrame(this.tripsRaf)
     this.tripsRaf = null
-    for (const id of Object.keys(this.rawRetryTimers)) this.clearRawRuntime(id)
-    this.pendingRaw = {}
-    this.lastAutoRetryAt = {}
+    for (const rt of this.raw.values()) rt.clearRetryTimer()
+    this.raw.clear()
     this.lastLayers = []
     this.overlay = null
     this.map = null

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentType } from 'react'
 import maplibregl from 'maplibre-gl'
-import type { ExpressionSpecification, FilterSpecification, GeoJSONSource, LayerSpecification, Map as MapLibreMap, Point, RasterTileSource, StyleSpecification } from 'maplibre-gl'
+import type { GeoJSONSource, Map as MapLibreMap, Point, RasterTileSource } from 'maplibre-gl'
 import styles from './webgis.module.css'
 import { LayerPanel } from './LayerPanel.js'
 import { AttributeDrawer } from './AttributeDrawer.js'
@@ -18,6 +18,16 @@ import { geojsonKindOf, rawLineData, rawPointData, rawPolygonData } from './geoa
 import type { DisplayMode, FeaturePayload, LayerSummary } from './gis-types.js'
 import type { FeatureCollection } from 'geojson'
 import { formatArea, formatDistance, haversineM, pathMeters, polygonAreaM2, ringPathMeters, segmentMeters, type Pt } from './measure-utils.js'
+// 自本文件拆分出的模块级 helper（样式/高亮/浮窗/点击链路/渲染规格）
+import { EMPTY_COLLECTION, applyBaseMap, baseStyle, fmtCoord, ensureDataLayers, ensureMeasureLayers, syncOverlays } from './map-style.js'
+import { useMapMeasure } from './use-map-measure.js'
+import { createLayerSync } from './layer-sync.js'
+import { SEL_SRC, ensureSelLayers, clearMapSelection, setMapSelection } from './map-highlight.js'
+import { isScalar, scalarRows, featureTitle, fmtCell, makeAttrTable, buildPopupContent } from './map-popup.js'
+import { queryFeatures, collectCoords, captureMapScreenshot, drawPin, fitToGeoJSON, clearPick, recordPick } from './map-pick.js'
+import type { ScreenshotPayload } from './map-pick.js'
+import { renderKinds, makeRenderLayer, darkenHex, maxDensityOf, hexHeightFor, makeHeatLayer, makeHexLayer, CLUSTER_BASE_RADIUS, shadeColor, clusterColorFor, clusterRadius, makeClusterLayer, makeClusterCountLayer, LAYER_KINDS, ALL_RENDER_SUFFIXES, RENDER_ROW_KEY, RENDER_LAYER_KEY, DECK_MODES, SRC, RID, SRC_HEX, layerShapeKey } from './map-render-spec.js'
+import type { RenderKind, RenderStyle } from './map-render-spec.js'
 
 interface StateResponse {
   baseTileUrl: string
@@ -35,614 +45,12 @@ interface StateResponse {
   layers: LayerSummary[]
 }
 
-/** 提取地图上某像素点命中的要素（点击 / 图框中心捕获共用）。 */
-function queryFeatures(map: MapLibreMap, point: Point): FeaturePayload[] {
-  return map.queryRenderedFeatures(point)
-    .slice(0, 30)
-    .map((f) => ({
-      id: f.id ?? null,
-      layer: f.layer.id,
-      source: f.source,
-      geometryType: f.geometry?.type ?? null,
-      properties: f.properties ?? {},
-    }))
-}
-
-// ---- 点击属性查询（功能 3：点击 = 属性浮窗，LLM 出环；同时记录 pick 供 AI 引用） ----
-
-/** 属性值是否可直接展示（标量，排除对象/数组/空串）。 */
-function isScalar(v: unknown): boolean {
-  return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
-}
-
-/** 要素属性里可展示的标量键值对（原顺序）。 */
-function scalarRows(props: Record<string, unknown>): Array<[string, unknown]> {
-  return Object.entries(props).filter(([k, v]) => k !== '' && isScalar(v) && v !== '')
-}
-
-/** 浮窗标题字段优先顺序：名称类 → 地址类 → 类型类。 */
-function featureTitle(props: Record<string, unknown>): string | null {
-  const prefers = ['name', '名称', '名字', 'title', '地名', '小区名称', 'address', '地址', 'type', '类别', '大类']
-  for (const k of prefers) {
-    const v = props[k]
-    if (isScalar(v) && String(v).trim()) return String(v).trim()
-  }
-  return null
-}
-
-function fmtCell(v: unknown): string {
-  const s = String(v)
-  return s.length > 160 ? `${s.slice(0, 160)}…` : s
-}
-
-/** 属性键值对 → 两列表格元素。 */
-function makeAttrTable(rows: Array<[string, unknown]>): HTMLElement {
-  const table = document.createElement('table')
-  table.className = styles.popupTable!
-  for (const [k, v] of rows) {
-    const tr = document.createElement('tr')
-    const th = document.createElement('th')
-    th.textContent = k
-    th.title = k
-    const td = document.createElement('td')
-    td.textContent = fmtCell(v)
-    td.title = td.textContent
-    tr.append(th, td)
-    table.appendChild(tr)
-  }
-  return table
-}
-
-/** 浮窗 DOM：标题 + 图层/几何元信息 + 关键字段表 +（字段多时）「查看全部属性」展开。
- *  `onToggle`：展开后内容变高，需通知 popup 重新定位（maplibre 不自动重排）。
- *  `t` 在调用点传入（map 监听一次性绑定，从 tRef 取当前语言，避免语言切换后 stale）。 */
-function buildPopupContent(feature: FeaturePayload, t: WebgisT, onToggle?: () => void): HTMLElement {
-  const root = document.createElement('div')
-  root.className = styles.popupRoot!
-  const title = featureTitle(feature.properties)
-  if (title) {
-    const h = document.createElement('div')
-    h.className = styles.popupTitle!
-    h.textContent = title
-    root.appendChild(h)
-  }
-  const meta = document.createElement('div')
-  meta.className = styles.popupMeta!
-  meta.textContent = `${feature.layer}${feature.id != null ? ` · #${feature.id}` : ''}${feature.geometryType ? ` · ${feature.geometryType}` : ''}`
-  root.appendChild(meta)
-
-  const rows = scalarRows(feature.properties)
-  if (rows.length === 0) {
-    const empty = document.createElement('div')
-    empty.className = styles.popupEmpty!
-    empty.textContent = t('popup.empty')
-    root.appendChild(empty)
-    return root
-  }
-  const KEY_FIELDS = 4
-  const table = makeAttrTable(rows.slice(0, KEY_FIELDS))
-  root.appendChild(table)
-  if (rows.length > KEY_FIELDS) {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = styles.popupToggle!
-    btn.textContent = t('popup.viewAll', { n: rows.length })
-    btn.addEventListener('click', () => {
-      table.remove()
-      btn.remove()
-      root.appendChild(makeAttrTable(rows))
-      onToggle?.()
-    })
-    root.appendChild(btn)
-  }
-  return root
-}
-
-/** 右键清除图钉：通知 host 清掉最近一次 pick（坐标/要素/截图），后续 webgis_get_pick 将重新捕获当前视图。 */
-function clearPick(sessionId?: string): void {
-  fetch(sessionUrl(sessionId, '/webgis/pick'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ clear: true }),
-  }).catch(() => {})
-}
-
-/** 记录点击/捕获 pick 并上报 host：截地图模块截图（红点=关注位置）→ POST /webgis/pick。返回截图（可能 null）。 */
-function recordPick(
-  map: MapLibreMap,
-  lng: number,
-  lat: number,
-  features: FeaturePayload[],
-  captureSeq?: number,
-  sessionId?: string,
-): ScreenshotPayload | null {
-  const shot = captureMapScreenshot(map, lng, lat)
-  const payload: Record<string, unknown> = { lng, lat, features }
-  if (captureSeq !== undefined) payload.captureSeq = captureSeq
-  if (shot) payload.screenshot = shot
-  fetch(sessionUrl(sessionId, '/webgis/pick'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  }).catch(() => {})
-  return shot
-}
-
-const EMPTY_COLLECTION = { type: 'FeatureCollection' as const, features: [] as never[] }
-
-/** 初始化底图样式：栅格底图 + 数据图层。glyphs 供 symbol 文本（如聚合圈数字）渲染字形。 */
-function baseStyle(tiles: string[]): StyleSpecification {
-  return {
-    version: 8,
-    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-    sources: {
-      base: { type: 'raster', tiles, tileSize: 256 },
-      data: { type: 'geojson', data: EMPTY_COLLECTION as never },
-    },
-    layers: [
-      { id: 'base', type: 'raster', source: 'base' },
-      {
-        id: 'data-points',
-        type: 'circle',
-        source: 'data',
-        paint: {
-          'circle-color': '#3b82f6',
-          'circle-radius': 6,
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#ffffff',
-        },
-      },
-    ],
-  }
-}
-
-/** 视窗范围坐标小数位随 zoom 自适应：低倍省字符，高倍保精度（≥12 → 4 位，9+ → 3 位，6+ → 2 位，否则 1 位）。 */
-function fmtCoord(v: number, zoom: number): string {
-  const d = zoom >= 12 ? 4 : zoom >= 9 ? 3 : zoom >= 6 ? 2 : 1
-  const f = Math.round(v * 10 ** d) / 10 ** d
-  return Object.is(f, -0) ? '0' : String(f)
-}
-
 // ---- 底图切换 + 叠加服务 + 样式重建 ----
-
-/**
- * 应用底图切换：光栅换瓦片 / 光栅重载样式 / 矢量样式整替换。
- * 所有 setStyle 一律 { diff: false } 强制整样式重建：
- * maplibre 对「已存在样式」默认走 smart-diff(_diffStyle)，从自定义小光栅样式 diff 成 Carto/OpenFreeMap
- * 这类大型异构矢量样式时，矢量源被建但**层不重绘**（瓦片拉取解析正常却不显示，只剩背景灰底；
- * 复现页 B 组「新建地图」正常即 diff:false = _updateStyle 全量重建 = 同一路径）。
- * 矢量样式按 **URL 字符串** setStyle（不经页面 fetch/style 对象）：与「新建地图」同款，由 maplibre 内部拉取，
- * 规避 DSH 页面 CSP 对跨域 fetch 的限制；不覆写 glyphs——矢量底图自带 Carto/OpenFreeMap 字体端点
- * （demotiles 字体并不含数据层聚合圈要用的 Noto Sans Regular，原覆写反而有缺字形风险）。
- */
-async function applyBaseMap(map: MapLibreMap, def: BaseMapDef, defaultTiles: string[]): Promise<void> {
-  const url = def.kind === 'raster' && !def.url ? (defaultTiles[0] ?? '') : def.url
-  const action = baseMapAction({ ...def, url }, map.getSource('base') != null)
-  if (action.kind === 'setTiles') {
-    ;(map.getSource('base') as RasterTileSource | undefined)?.setTiles([action.url])
-    return
-  }
-  if (action.kind === 'setStyleRaster') {
-    map.setStyle(baseStyle([action.url]), { diff: false })
-    return
-  }
-  map.setStyle(action.url, { diff: false })
-}
-
-/** 保证 data geojson 源 + data-points 图层存在（换过整套样式后按需补挂）。 */
-function ensureDataLayers(map: MapLibreMap): void {
-  if (map.getLayer('data-points')) return
-  if (!map.getSource('data')) map.addSource('data', { type: 'geojson', data: EMPTY_COLLECTION as never })
-  map.addLayer({
-    id: 'data-points',
-    type: 'circle',
-    source: 'data',
-    paint: { 'circle-color': '#3b82f6', 'circle-radius': 6, 'circle-stroke-width': 1, 'circle-stroke-color': '#ffffff' },
-  })
-}
-
-/** 测量渲染层：闭合面填充 / 线 / 顶点 / 预览（常驻；data 为空则不可见）。style 整重建后由 ensure 重新补齐。 */
-function ensureMeasureLayers(map: MapLibreMap): void {
-  if (map.getSource('measure')) return
-  map.addSource('measure', { type: 'geojson', data: EMPTY_COLLECTION as never })
-  map.addSource('measure-hover', { type: 'geojson', data: EMPTY_COLLECTION as never })
-  // 闭合为面时的半透明填充（放最底下，line 描边叠在上）
-  const fill: LayerSpecification = {
-    id: 'measure-fill', type: 'fill', source: 'measure',
-    paint: { 'fill-color': '#f59e0b', 'fill-opacity': 0.18 },
-  }
-  map.addLayer(fill)
-  const line: LayerSpecification = {
-    id: 'measure-line', type: 'line', source: 'measure',
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
-    paint: { 'line-color': '#f59e0b', 'line-width': 2.5 },
-  }
-  map.addLayer(line)
-  const vertex: LayerSpecification = {
-    id: 'measure-vertex', type: 'circle', source: 'measure',
-    paint: { 'circle-radius': 4, 'circle-color': '#ffffff', 'circle-stroke-width': 2, 'circle-stroke-color': '#f59e0b' },
-  }
-  map.addLayer(vertex)
-  const hover: LayerSpecification = {
-    id: 'measure-hover-line', type: 'line', source: 'measure-hover',
-    paint: { 'line-color': '#f59e0b', 'line-width': 1.5, 'line-dasharray': [2, 2] },
-  }
-  map.addLayer(hover)
-  // 吸附目标高亮圆环（measure-hover 源里的 Point 特征，吸附时可见）
-  const hoverVertex: LayerSpecification = {
-    id: 'measure-hover-vertex', type: 'circle', source: 'measure-hover',
-    paint: { 'circle-radius': 7, 'circle-color': 'rgba(255,255,255,0.4)', 'circle-stroke-width': 3, 'circle-stroke-color': '#f97316' },
-  }
-  map.addLayer(hoverVertex)
-}
-
-/** 同步叠加地图服务（WMTS/WMS/XYZ 光栅层）：加缺、换 URL、切可见性、移除已删。插在 data-points 之下。 */
-function syncOverlays(map: MapLibreMap, services: OverlayService[]): void {
-  const seen = new Set<string>()
-  for (const svc of services) {
-    seen.add(svc.id)
-    const srcId = `overlay-src-${svc.id}`
-    const layerId = `overlay-${svc.id}`
-    const src = map.getSource(srcId) as RasterTileSource | undefined
-    if (!src) map.addSource(srcId, { type: 'raster', tiles: [svc.url], tileSize: svc.tileSize ?? 256 })
-    else if (src.tiles && src.tiles[0] !== svc.url) src.setTiles([svc.url])
-    if (!map.getLayer(layerId)) {
-      if (map.getLayer('data-points')) map.addLayer({ id: layerId, type: 'raster', source: srcId }, 'data-points')
-      else map.addLayer({ id: layerId, type: 'raster', source: srcId })
-    }
-    map.setLayoutProperty(layerId, 'visibility', svc.visible ? 'visible' : 'none')
-  }
-  // 移除已不存在的叠加层
-  for (const l of [...(map.getStyle()?.layers ?? [])]) {
-    if (!l.id.startsWith('overlay-')) continue
-    const id = l.id.slice('overlay-'.length)
-    if (seen.has(id)) continue
-    if (map.getLayer(l.id)) map.removeLayer(l.id)
-    if (map.getSource(`overlay-src-${id}`)) map.removeSource(`overlay-src-${id}`)
-  }
-}
-
-/** 收集 GeoJSON 里所有坐标对，用于计算 bbox。 */
-function collectCoords(geo: unknown, out: number[][]): void {
-  const g = geo as { type?: string; features?: unknown[]; geometry?: unknown; coordinates?: unknown; geometries?: unknown[] } | null | undefined
-  if (!g?.type) return
-  switch (g.type) {
-    case 'FeatureCollection':
-      (g.features ?? []).forEach((f) => collectCoords(f, out))
-      break
-    case 'Feature':
-      collectCoords(g.geometry, out)
-      break
-    case 'Point':
-      out.push(g.coordinates as number[])
-      break
-    case 'MultiPoint':
-    case 'LineString':
-      ((g.coordinates ?? []) as number[][]).forEach((c) => out.push(c))
-      break
-    case 'Polygon':
-      ((g.coordinates ?? []) as number[][][]).forEach((ring) => ring.forEach((c) => out.push(c)))
-      break
-    case 'MultiLineString':
-      ((g.coordinates ?? []) as number[][][]).forEach((line) => line.forEach((c) => out.push(c)))
-      break
-    case 'MultiPolygon':
-      ((g.coordinates ?? []) as number[][][][]).forEach((poly) => poly.forEach((ring) => ring.forEach((c) => out.push(c))))
-      break
-    case 'GeometryCollection':
-      (g.geometries ?? []).forEach((geom) => collectCoords(geom, out))
-      break
-  }
-}
-
-/** 截图上报 payload：与 host 端 parseScreenshot 约定的结构。 */
-interface ScreenshotPayload {
-  dataUrl: string
-  scale: number
-  pin: { x: number; y: number }
-  viewport: {
-    width: number
-    height: number
-    zoom: number
-    bearing: number
-    pitch: number
-    centerLng: number
-    centerLat: number
-  }
-}
-
-/**
- * 截取地图模块（仅 WebGL canvas，不含任何 DOM）：把 canvas 画到 2D canvas 上、
- * 在点击位置合成红色图钉、限制最大边长后输出 PNG dataURL。同时记录截图那一刻的
- * 视口与缩放，供 host 做「截图像素 ↔ 经纬度」换算（不依赖之后的 live map）。
- * 失败（无 canvas / 无 2d context）返回 null，调用方降级为仅上报坐标。
- */
-function captureMapScreenshot(map: MapLibreMap, lng: number, lat: number): ScreenshotPayload | null {
-  const canvas = map.getCanvas()
-  const bw = canvas.width
-  const bh = canvas.height
-  const cssWidth = map.getContainer().clientWidth || bw
-  const cssHeight = map.getContainer().clientHeight || bh
-  if (!bw || !bh) return null
-
-  const MAX_EDGE = 1024
-  const imgScale = Math.min(1, MAX_EDGE / Math.max(bw, bh))
-  const w = Math.max(1, Math.round(bw * imgScale))
-  const h = Math.max(1, Math.round(bh * imgScale))
-
-  const out = document.createElement('canvas')
-  out.width = w
-  out.height = h
-  const ctx = out.getContext('2d')
-  if (!ctx) return null
-  ctx.drawImage(canvas, 0, 0, w, h)
-
-  // 图钉像素位置：map.project 给 css 像素 → 换算到输出图像像素（scale = 图像px / css px）
-  const pinCss = map.project([lng, lat])
-  const scale = w / cssWidth
-  const pinX = pinCss.x * scale
-  const pinY = pinCss.y * scale
-  drawPin(ctx, pinX, pinY, Math.max(5, 10 * scale))
-
-  const center = map.getCenter()
-  return {
-    dataUrl: out.toDataURL('image/png'),
-    scale,
-    pin: { x: pinX, y: pinY },
-    viewport: {
-      width: cssWidth,
-      height: cssHeight,
-      zoom: map.getZoom(),
-      bearing: map.getBearing(),
-      pitch: map.getPitch(),
-      centerLng: center.lng,
-      centerLat: center.lat,
-    },
-  }
-}
-
-/** 在截图里画一个实心红点 + 白色描边（等价于 DOM 图钉的视觉）。 */
-function drawPin(ctx: CanvasRenderingContext2D, x: number, y: number, r: number): void {
-  ctx.beginPath()
-  ctx.arc(x, y, r, 0, Math.PI * 2)
-  ctx.fillStyle = '#ef4444'
-  ctx.fill()
-  ctx.lineWidth = Math.max(1.5, r * 0.22)
-  ctx.strokeStyle = '#ffffff'
-  ctx.stroke()
-}
-
-function fitToGeoJSON(map: MapLibreMap, geojson: unknown): void {
-  const coords: number[][] = []
-  collectCoords(geojson, coords)
-  if (coords.length === 0) return
-  let minLng = Infinity
-  let minLat = Infinity
-  let maxLng = -Infinity
-  let maxLat = -Infinity
-  for (const [lng, lat] of coords) {
-    if (typeof lng === 'number' && typeof lat === 'number') {
-      if (lng < minLng) minLng = lng
-      if (lng > maxLng) maxLng = lng
-      if (lat < minLat) minLat = lat
-      if (lat > maxLat) maxLat = lat
-    }
-  }
-  if (minLng === Infinity) return
-  if (minLng === maxLng && minLat === maxLat) {
-    map.flyTo({ center: [minLng, minLat], zoom: 8, duration: 800 })
-  } else {
-    map.fitBounds([[minLng, minLat], [maxLng, maxLat]], { padding: 40, duration: 800 })
-  }
-}
-
-// ---- 结果图层动态渲染 ----
-
-type RenderKind = 'fill' | 'line' | 'circle'
-
-/** 按几何类型决定该图层渲染哪几类 maplibre layer。 */
-function renderKinds(types: string[]): RenderKind[] {
-  const k: RenderKind[] = []
-  if (types.some((t) => t.includes('Polygon'))) k.push('fill')
-  if (types.some((t) => t.includes('LineString'))) k.push('line')
-  if (types.some((t) => t.includes('Point'))) k.push('circle')
-  return k.length > 0 ? k : ['circle']
-}
-
-/** 渲染样式（color 为整体底色；fillColor 覆盖填充、pointRadius/strokeWidth 控制点位大小与描边）。 */
-interface RenderStyle {
-  color: string
-  pointRadius?: number
-  pointStrokeWidth?: number
-  fillColor?: string
-}
-
-/** 渲染一个普通要素层；聚合模式下 circle 层带 filter 排除聚合点（!has point_count）。
- *  fill 层填充=fillColor??color、边界=color；circle 层填充=fillColor??color、描边=color。 */
-function makeRenderLayer(id: string, srcId: string, kind: RenderKind, style: RenderStyle, filter?: FilterSpecification): LayerSpecification {
-  const base = filter ? { filter } : {}
-  if (kind === 'fill') {
-    return { ...base, id, type: 'fill', source: srcId, paint: { 'fill-color': style.fillColor ?? style.color, 'fill-opacity': 0.45, 'fill-outline-color': style.color } }
-  }
-  if (kind === 'line') {
-    return { ...base, id, type: 'line', source: srcId, paint: { 'line-color': style.color, 'line-width': 2 } }
-  }
-  return { ...base, id, type: 'circle', source: srcId, paint: {
-    'circle-color': style.fillColor ?? style.color,
-    'circle-radius': style.pointRadius ?? 5,
-    'circle-stroke-width': style.pointStrokeWidth ?? 1,
-    'circle-stroke-color': style.color,
-  } }
-}
-
-// ---- 热力图展示方式（平面 heatmap / 蜂窝 fill-extrusion，maplibre 原生渲染） ----
-
-/** 扫出要素集里 density 属性的峰值（无 density 属性返回 0）。 */
-function maxDensityOf(geo: FeatureCollection): number {
-  let max = 0
-  for (const f of geo.features) {
-    const d = Number(f?.properties?.density)
-    if (Number.isFinite(d) && d > max) max = d
-  }
-  return max
-}
-
-/** 蜂窝柱最大高度（米）：按图层 bbox 短边比例钳制 40–200m，避免大尺度失真。 */
-function hexHeightFor(bbox: [number, number, number, number] | null): number {
-  if (!bbox) return 100
-  const [w, s, e, n] = bbox
-  const midLat = (s + n) / 2
-  const mPerDegLon = 111320 * Math.cos((midLat * Math.PI) / 180)
-  const mPerDegLat = 110540
-  const short = Math.min((e - w) * mPerDegLon, (n - s) * mPerDegLat)
-  return Math.max(40, Math.min(200, short * 0.02))
-}
-
-/** 平面热力图：maplibre 原生 heatmap 层。weight 按 density 归一化到 [0,1]；无 density 则按点数计数（weight=1）。 */
-function makeHeatLayer(id: string, srcId: string, maxDensity: number): LayerSpecification {
-  const weight: ExpressionSpecification | number = maxDensity > 0
-    ? ['case', ['has', 'density'],
-        ['interpolate', ['linear'], ['get', 'density'], 0, 0, maxDensity, 1],
-        1]
-    : 1
-  return {
-    id,
-    type: 'heatmap',
-    source: srcId,
-    paint: {
-      'heatmap-weight': weight,
-      'heatmap-intensity': 1,
-      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'],
-        0, 'rgba(0, 0, 0, 0)',
-        0.1, 'rgba(35, 74, 135, 0.55)',
-        0.3, 'rgb(48, 142, 178)',
-        0.5, 'rgb(120, 198, 121)',
-        0.7, 'rgb(254, 221, 87)',
-        0.9, 'rgb(244, 110, 50)',
-        1, 'rgb(170, 20, 20)'] as ExpressionSpecification,
-      'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 10, 6, 20, 12, 34] as ExpressionSpecification,
-      'heatmap-opacity': 0.85,
-    },
-  }
-}
-
-/** 蜂窝热力图：六边形柱（fill-extrusion），柱高=density 归一化×maxHeight，颜色热色带。 */
-function makeHexLayer(id: string, srcId: string, maxDensity: number, maxHeight: number): LayerSpecification {
-  const h = maxDensity > 0 ? maxHeight : 0
-  return {
-    id,
-    type: 'fill-extrusion',
-    source: srcId,
-    paint: {
-      'fill-extrusion-color': maxDensity > 0
-        ? ['interpolate', ['linear'], ['get', 'density'],
-            0, '#234a87', maxDensity * 0.25, '#308eb2', maxDensity * 0.5, '#78c679',
-            maxDensity * 0.75, '#fedd57', maxDensity, '#f06e32'] as ExpressionSpecification
-        : '#234a87',
-      'fill-extrusion-height': maxDensity > 0
-        ? ['interpolate', ['linear'], ['get', 'density'], 0, 0, maxDensity, h] as ExpressionSpecification
-        : 0,
-      'fill-extrusion-base': 0,
-      'fill-extrusion-opacity': 0.82,
-      'fill-extrusion-vertical-gradient': false,
-    },
-  }
-}
 
 // ---- supercluster 聚合圈：单层 circle + circle-blur 羽化边缘（内发光） ----
 // maplibre 官方 paint 属性 circle-blur 直接生成"实心核心 + 高斯羽化边缘"，单层即内发光效果，
 // 比多同心圆叠加省约 20 倍绘制、无环纹、增删/点击管理更简单。
 // 数量越大：圈越大、颜色越深（在图层基色上加深，支持用户指定任意颜色）。
-
-/** 聚合圈最大半径（px），随数量增长。 */
-const CLUSTER_BASE_RADIUS: Array<[number, number]> = [
-  [0, 34], [100, 46], [1000, 60], [10000, 74], [100000, 92],
-]
-
-/** 把 #rrggbb 往白色（percent>0）或黑色（percent<0）方向调亮/调暗，用于生成加深色阶。 */
-function shadeColor(hex: string, percent: number): string {
-  const h = hex.replace('#', '')
-  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h
-  const num = parseInt(full, 16)
-  if (!Number.isFinite(num) || full.length !== 6) return hex
-  const amt = Math.round(2.55 * percent)
-  const r = Math.min(255, Math.max(0, (num >> 16) + amt))
-  const g = Math.min(255, Math.max(0, ((num >> 8) & 0xff) + amt))
-  const b = Math.min(255, Math.max(0, (num & 0xff) + amt))
-  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`
-}
-
-/** 圈色：以图层基色为基准，数量越大颜色越深（浅色 → 基色 → 深色）。 */
-function clusterColorFor(base: string): ExpressionSpecification {
-  const stops: Array<[number, string]> = [
-    [0, shadeColor(base, 42)],
-    [10, shadeColor(base, 20)],
-    [100, base],
-    [1000, shadeColor(base, -22)],
-    [10000, shadeColor(base, -45)],
-  ]
-  return ['interpolate', ['linear'], ['get', 'point_count'], ...stops.flat()] as ExpressionSpecification
-}
-
-/** 圈半径：按 point_count 插值（数量越大圈越大）。 */
-function clusterRadius(): ExpressionSpecification {
-  return ['interpolate', ['linear'], ['get', 'point_count'], ...CLUSTER_BASE_RADIUS.flat()] as ExpressionSpecification
-}
-
-/** supercluster 聚合圈：单层 circle + circle-blur 羽化边缘（内发光），点击放大（见 click handler）。 */
-function makeClusterLayer(id: string, srcId: string, color: string): LayerSpecification {
-  return {
-    id,
-    type: 'circle',
-    source: srcId,
-    filter: ['has', 'point_count'],
-    paint: {
-      'circle-color': clusterColorFor(color),
-      'circle-radius': clusterRadius(),
-      'circle-blur': 1,
-    },
-  }
-}
-
-/** 聚合圈中心数字：官方 supercluster 模式（symbol + text-field 取 point_count_abbreviated，如 1.2k）。 */
-function makeClusterCountLayer(id: string, srcId: string): LayerSpecification {
-  return {
-    id,
-    type: 'symbol',
-    source: srcId,
-    filter: ['has', 'point_count'],
-    layout: {
-      'text-field': ['get', 'point_count_abbreviated'],
-      'text-font': ['Noto Sans Regular'],
-      'text-size': ['interpolate', ['linear'], ['get', 'point_count'], 0, 12, 1000, 14, 100000, 18],
-      'text-allow-overlap': true,
-      'text-ignore-placement': true,
-    },
-    paint: {
-      'text-color': '#ffffff',
-      'text-halo-color': 'rgba(0, 0, 0, 0.55)',
-      'text-halo-width': 1.5,
-    },
-  }
-}
-
-const LAYER_KINDS: RenderKind[] = ['fill', 'line', 'circle']
-/** 一个图层的全部可能渲染层后缀（普通 fill/line/circle + 聚合 + 平面热力 heat + 蜂窝 hex + 面描边 outline）。 */
-const ALL_RENDER_SUFFIXES: string[] = [...LAYER_KINDS, 'cluster', 'cluster-count', 'heat', 'hex', 'outline']
-/** deck.gl 出图的展示方式（弧线/轨迹/围墙/辐射）；这些模式走 deck 注册表渲染，不建 maplibre 层。 */
-const DECK_MODES: ReadonlySet<DisplayMode> = new Set(['arc', 'trips', 'wall', 'radial'])
-const SRC = (id: string) => `gis-${id}`
-const RID = (id: string, kind: string) => `gis-${id}-${kind}`
-/** 蜂窝归并结果专用 source（与原图层 source 分开，避免污染 points 数据）。 */
-const SRC_HEX = (id: string) => `gis-${id}-hex`
-
-/** 图层“内容形态”签名：rev 之外的渲染关键属性变化也驱动重建（同 id 换数据集/几何形态/渲染器时兜底）。
- *  若不比较这些，换 dataset 时 rev 都归 0、颜色样式又恰好相同 → 变更判定 miss、旧层残留新数据不拉。 */
-function layerShapeKey(s: {
-  geometryTypes?: string[]; renderer?: string; dataFormat?: string; name?: string; source?: string
-}): string {
-  return JSON.stringify({ gt: s.geometryTypes, ren: s.renderer, df: s.dataFormat, name: s.name, src: s.source })
-}
 
 /** ExportMapDialog（export 懒 chunk）的 props（镜像自 ExportMapDialog.tsx 实际签名）。 */
 interface ExportDialogProps {
@@ -672,6 +80,11 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
   const closePopup = (): void => {
     popupRef.current?.remove()
     popupRef.current = null
+    // 关闭浮窗/空点击/右键时一并清掉点击高亮
+    const m = mapRef.current
+    if (m) {
+      try { clearMapSelection(m) } catch { /* 样式未就绪/已卸载：忽略 */ }
+    }
   }
   /** 出图结果上传 host（「导出并给 AI 看」；带 AI 请求的 seq 回传供等待中的 webgis_export_map 收）。失败静默（本地下载仍可用）。 */
   const postExportImage = async (dataUrl: string, width: number, height: number, title: string): Promise<void> => {
@@ -701,8 +114,11 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
   const gisSeen = useRef<Record<string, {
     rev: number; visible: boolean; mode: DisplayMode; color?: string; params?: string; style?: string; shape?: string
   }>>({})
-  /** 客户端已拉取的图层全量数据缓存（切换展示方式时免重新请求）。 */
+  /** 客户端已拉取的图层全量数据缓存（deck 出图/raw geojson/热力等需要属性的路径用）。 */
   const dataCache = useRef<Record<string, FeatureCollection>>({})
+  /** 客户端已拉取的「渲染轻量」缓存（/webgis/layer-render：几何+__i，无属性；maplibre 直接渲染用，
+   *  避免属性极重的大图层整层拖到浏览器）。点击属性按 __i 走 /webgis/layer-row 按行取。 */
+  const renderCache = useRef<Record<string, FeatureCollection>>({})
   /** 当前激活的聚合层 id（点击放大用；syncLayers 维护）。 */
   const clusterLayerIds = useRef<Set<string>>(new Set())
   /** 图层面板数据（轮询 /webgis/state 回填）与当前打开属性的图层。 */
@@ -714,139 +130,8 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
   const [viewInfo, setViewInfo] = useState<{ zoom: number; w: number; s: number; e: number; n: number } | null>(null)
 
   // ---- 测量：点击加点沿折线测长；点回起点闭合 → 同时给周长+面积；自动吸附图层点。只读，不落地成图层。 ----
-  const [measuring, setMeasuring] = useState(false)
-  const measuringRef = useRef(false)
-  measuringRef.current = measuring
-  /** 已提交的测量顶点（折线 / 闭合多边形环）。 */
-  const measurePts = useRef<Pt[]>([])
-  /** 当前是否闭合为面（≥3 点且点回起点触发）。 */
-  const [measureClosed, setMeasureClosed] = useState(false)
-  const measureClosedRef = useRef(false)
-  measureClosedRef.current = measureClosed
-  /** 逐段距离（米），加点/收尾时重算（驱动 readout 渲染）。 */
-  const [measureSegs, setMeasureSegs] = useState<number[]>([])
-  /** 是否收尾保留了结果（非测量中也显示，再点测量即清空开新一轮）。 */
-  const [measureDone, setMeasureDone] = useState(false)
-  /** mousemove 实时预览段长文字（末点→光标），直写 DOM 避免逐帧 setState。 */
-  const measurePreviewEl = useRef<HTMLSpanElement | null>(null)
-  /** 双击去抖：双击的两记 click 只算一记（第二记交给 dblclick 收尾）。 */
-  const lastMeasureClick = useRef(0)
-  /** 吸附阈值（像素）。吸附对象 = 本次测量**已画出的顶点**（含起点），用于精确对齐与点回起点闭合。 */
-  const SNAP_PX = 20
-  /** 像素距离最近且在 SNAP_PX 内的候选；无则 null。 */
-  const nearestPixelPt = (map: MapLibreMap, x: number, y: number, cands: Pt[]): { pt: Pt; d2: number } | null => {
-    let best: { pt: Pt; d2: number } | null = null
-    const lim = SNAP_PX * SNAP_PX
-    for (const p of cands) {
-      const s = map.project([p.lon, p.lat])
-      const dx = s.x - x
-      const dy = s.y - y
-      const d2 = dx * dx + dy * dy
-      if (d2 <= lim && (best == null || d2 < best.d2)) best = { pt: p, d2 }
-    }
-    return best
-  }
-  /** 测量时可吸附的自己顶点：≥3 点后才启用（此前除起点外没有可复用的点）；
-   *  取除最近一个以外的全部（含起点）——避免刚点完就叠在同一点，且 2 点时不会误把第二点叠回起点。 */
-  const ownSnapCands = (): Pt[] => {
-    const pts = measurePts.current
-    return pts.length >= 3 ? pts.slice(0, pts.length - 1) : []
-  }
-
-  /** 已提交顶点 → measure 源（折线 / 闭合多边形 + 顶点圆点）。 */
-  const writeMeasure = (): void => {
-    const map = mapRef.current
-    const src = map?.getSource('measure') as GeoJSONSource | undefined
-    if (!src) return
-    const pts = measurePts.current
-    if (pts.length === 0) { src.setData(EMPTY_COLLECTION); return }
-    const coords = pts.map((p): [number, number] => [p.lon, p.lat])
-    const feats: unknown[] = []
-    if (measureClosedRef.current && pts.length >= 3) {
-      // 闭合：一个多边形（fill 层填充、line 层描边），顶点仍画圆点。
-      feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[...coords, coords[0]!]] } })
-    } else if (pts.length >= 2) {
-      feats.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } })
-    } else {
-      feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: coords[0] } })
-    }
-    for (const c of coords) feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } })
-    src.setData({ type: 'FeatureCollection', features: feats } as never)
-  }
-  /** 末点→target 虚线预览 + 实时段长；吸附时在 target 画高亮点。null 清除。 */
-  const writeMeasurePreview = (pv: { pt: Pt; snapped?: boolean } | null): void => {
-    const map = mapRef.current
-    const hover = map?.getSource('measure-hover') as GeoJSONSource | undefined
-    const last = measurePts.current[measurePts.current.length - 1]
-    const el = measurePreviewEl.current
-    if (hover && pv && last) {
-      const hf: unknown[] = [
-        { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[last.lon, last.lat], [pv.pt.lon, pv.pt.lat]] } },
-      ]
-      if (pv.snapped) hf.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [pv.pt.lon, pv.pt.lat] } })
-      hover.setData({ type: 'FeatureCollection', features: hf } as never)
-      if (el) el.textContent = `  + ${formatDistance(haversineM(last, pv.pt))}`
-    } else {
-      if (hover) hover.setData(EMPTY_COLLECTION)
-      if (el) el.textContent = ''
-    }
-  }
-  /** 测量时光标变十字 + 禁双击缩放；结束恢复。 */
-  const setMeasureCursor = (cross: boolean): void => {
-    const map = mapRef.current
-    if (!map) return
-    map.getCanvas().style.cursor = cross ? 'crosshair' : ''
-    try { if (cross) map.doubleClickZoom.disable(); else map.doubleClickZoom.enable() } catch { /* 忽略 */ }
-  }
-  const beginMeasure = (): void => {
-    measurePts.current = []
-    setMeasureSegs([])
-    setMeasureDone(false)
-    setMeasureClosed(false)
-    measureClosedRef.current = false
-    measuringRef.current = true
-    setMeasuring(true)
-    writeMeasure()
-    writeMeasurePreview(null)
-    setMeasureCursor(true)
-  }
-  /** 收尾：open=true 保留开环长度；closed=true 保留闭合周长+面积（≥3 点）；都 false 则清空。 */
-  const endMeasure = (open: boolean, closed: boolean): void => {
-    measuringRef.current = false
-    setMeasuring(false)
-    setMeasureCursor(false)
-    writeMeasurePreview(null)
-    const pts = measurePts.current
-    const ok = closed ? pts.length >= 3 : open && pts.length >= 2
-    if (ok) {
-      measureClosedRef.current = closed
-      setMeasureClosed(closed)
-      setMeasureSegs(segmentMeters(pts))
-      setMeasureDone(true)
-    } else {
-      measurePts.current = []
-      measureClosedRef.current = false
-      setMeasureClosed(false)
-      setMeasureSegs([])
-      setMeasureDone(false)
-    }
-    writeMeasure()
-  }
-  const finishMeasure = (): void => endMeasure(true, false)
-  const finishClosedMeasure = (): void => endMeasure(true, true)
-  const discardMeasure = (): void => endMeasure(false, false)
-  const addMeasureVertex = (p: Pt): void => {
-    measurePts.current.push(p)
-    setMeasureSegs(segmentMeters(measurePts.current))
-    writeMeasure()
-    writeMeasurePreview(null)
-  }
-  const toggleMeasure = (): void => { if (measuringRef.current) finishMeasure(); else beginMeasure() }
-  /** 开环累计长文本（未开始/已清空返回 ''）。 */
-  const measureLengthText = (): string => (measurePts.current.length >= 2 ? formatDistance(pathMeters(measurePts.current)) : '')
-  /** 闭合周长 / 面积文本。 */
-  const measurePerimeterText = (): string => (measurePts.current.length >= 3 ? formatDistance(ringPathMeters(measurePts.current)) : '')
-  const measureAreaText = (): string => (measurePts.current.length >= 3 ? formatArea(polygonAreaM2(measurePts.current)) : '')
+  // 测量工具（状态 + 地图交互）内聚在 hook 里；本组件只做事件委托与 readout 渲染。
+  const measure = useMapMeasure(mapRef)
   /** AI 出图请求预填（webgis_export_map）。 */
   const [exportPrefill, setExportPrefill] = useState<ExportPrefill | null>(null)
   const lastExportSeq = useRef(0)
@@ -990,29 +275,8 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     //   空点击   → 落图钉标记关注点 + 记录 pick（供 AI 引用坐标）
     // 截图红点 = 关注位置（点击处或图框中心），始终合成在截图里（与 DOM 图钉无关）。
     map.on('click', (e) => {
-      // 测量激活：左键加点。双击会连发两记 click，间隔 <300ms 的第二记交给 dblclick 收尾，不加点。
-      if (measuringRef.current) {
-        const now = performance.now()
-        if (now - lastMeasureClick.current < 300) { lastMeasureClick.current = 0; return }
-        lastMeasureClick.current = now
-        const pts = measurePts.current
-        const start = pts[0]
-        // 点回起点（≥3 点且在像素阈值内）→ 闭合成面：收尾给周长+面积。
-        if (start && pts.length >= 3) {
-          const sp = map.project([start.lon, start.lat])
-          const dx = e.point.x - sp.x
-          const dy = e.point.y - sp.y
-          if (dx * dx + dy * dy <= SNAP_PX * SNAP_PX) {
-            writeMeasurePreview(null)
-            finishClosedMeasure()
-            return
-          }
-        }
-        // 自动吸附：命中自己已画顶点（除最近一个）则落该点（含贴起点精确闭合引导），否则用点击坐标。
-        const snap = nearestPixelPt(map, e.point.x, e.point.y, ownSnapCands())
-        addMeasureVertex(snap ? snap.pt : { lon: e.lngLat.lng, lat: e.lngLat.lat })
-        return
-      }
+      // 测量激活：左键加点/点回起点闭合（细节见 use-map-measure）。
+      if (measure.onMapClick(map, e)) return
       // 绘图工具条激活时（点/线/面/贝塞尔/选择）：点击让位给 terradraw，不做属性查询/落图钉/pick。
       if (drawingActiveRef.current) return
       const clusterHits = map.queryRenderedFeatures(e.point, { layers: [...clusterLayerIds.current] })
@@ -1131,14 +395,73 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
         }
       }
       // 排除聚合圈自身（聚合层已在上面单独处理，这里兜底过滤掉混入的 cluster 要素）。
-      const hits = queryFeatures(map, e.point).filter((f) => f.properties?.cluster_id == null)
+      // 点中要素：取最上层非聚合要素（连同原始 geometry，供点击高亮）与其 payload 列表。
+      let topPayload: FeaturePayload | null = null
+      let topGeometry: unknown = null
+      const payloads: FeaturePayload[] = []
+      for (const f of map.queryRenderedFeatures(e.point).slice(0, 30)) {
+        if (f.properties?.cluster_id != null) continue // 排除聚合圈自身（聚合已在上面处理）
+        const pl: FeaturePayload = {
+          id: f.id ?? null,
+          layer: f.layer.id,
+          source: f.source,
+          geometryType: f.geometry?.type ?? null,
+          properties: f.properties ?? {},
+        }
+        payloads.push(pl)
+        if (!topPayload) { topPayload = pl; topGeometry = f.geometry ?? null }
+      }
 
-      if (hits.length > 0) {
-        // 点中要素：弹属性浮窗（最上层要素），不落图钉；清掉此前空点击留下的 DOM 图钉（避免误导）。
+      if (topPayload) {
         markerRef.current?.remove()
         markerRef.current = null
-        showFeaturePopup(hits[0]!, e.lngLat)
-        recordPick(map, lng, lat, hits, undefined, sessionRef.current)
+        const lightId = topPayload.properties[RENDER_LAYER_KEY]
+        const lightRow = topPayload.properties[RENDER_ROW_KEY]
+        if (typeof lightId === 'string' && typeof lightRow === 'number') {
+          // 轻量渲染层（无属性，面/线）命中：先关旧浮窗/清旧高亮，再高亮当前几何 + 按行取属性弹窗。
+          closePopup()
+          setMapSelection(map, topGeometry)
+          const popup = new maplibregl.Popup({
+            closeButton: true,
+            closeOnClick: false,
+            maxWidth: '340px',
+            offset: 12,
+          })
+          popupRef.current = popup
+          const loadingEl = document.createElement('div')
+          loadingEl.className = styles.popupRoot!
+          loadingEl.textContent = tRef.current('attr.loading')
+          popup.setLngLat([lng, lat]).setDOMContent(loadingEl).addTo(map)
+          void fetch(
+            sessionUrl(sessionRef.current, `/webgis/layer-row?id=${encodeURIComponent(lightId)}&row=${lightRow}`),
+            { cache: 'no-store' },
+          )
+            .then((r) => (r.ok ? (r.json() as Promise<{ ok?: boolean; name?: string; message?: string; attrs?: Record<string, unknown> }>) : null))
+            .then((d) => {
+              if (!d?.ok || !d.attrs) {
+                if (d?.message) console.warn('[MapView] 行号属性未命中', lightId, 'row', lightRow, '|', d.message)
+                closePopup() // 属性没取到：关掉 loading 浮窗与高亮
+                return
+              }
+              const reposition = (): void => { popup.setLngLat(popup.getLngLat()) }
+              const feat: FeaturePayload = {
+                id: null,
+                layer: d.name ?? lightId,
+                source: 'layer',
+                geometryType: topPayload?.geometryType ?? null,
+                properties: d.attrs,
+              }
+              popup.setDOMContent(buildPopupContent(feat, tRef.current, reposition))
+              recordPick(map, lng, lat, [feat], undefined, sessionRef.current)
+            })
+            .catch((err) => {
+              console.warn('[MapView] 行号属性查询失败', lightId, err)
+              closePopup()
+            })
+          return
+        }
+        showFeaturePopup(topPayload, e.lngLat)
+        recordPick(map, lng, lat, payloads, undefined, sessionRef.current)
         return
       }
 
@@ -1155,10 +478,7 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     // 右键：测距中 = 丢弃本次测量；否则清除图钉/关闭属性浮窗并通知 host 清掉最近一次 pick。
     map.on('contextmenu', (e) => {
       e.originalEvent?.preventDefault()
-      if (measuringRef.current) {
-        discardMeasure()
-        return
-      }
+      if (measure.onContextMenu()) return
       closePopup()
       if (markerRef.current) {
         markerRef.current.remove()
@@ -1170,36 +490,13 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     // 测量预览：移动光标把「末点→光标」画成虚线并实时刷新待加段长（有顶点才画）。
     // 自动吸附（自己已画顶点）：≥3 点后光标靠近起点/中间顶点即贴过去并高亮，点击可精确闭合或回折。
     map.on('mousemove', (e) => {
-      if (!measuringRef.current || measurePts.current.length === 0) return
-      const raw: Pt = { lon: e.lngLat.lng, lat: e.lngLat.lat }
-      let target = raw
-      let snapped = false
-      const cands = ownSnapCands()
-      const snap = nearestPixelPt(map, e.point.x, e.point.y, cands)
-      if (snap) { target = snap.pt; snapped = true }
-      // ≥3 点且贴近起点 → 贴起点并提示可闭合（优先于其他顶点吸附）。
-      const start = measurePts.current[0]
-      if (start && measurePts.current.length >= 3) {
-        const sp = map.project([start.lon, start.lat])
-        const dx = e.point.x - sp.x
-        const dy = e.point.y - sp.y
-        if (dx * dx + dy * dy <= SNAP_PX * SNAP_PX) { target = start; snapped = true }
-      }
-      writeMeasurePreview({ pt: target, snapped })
+      measure.onMouseMove(map, e)
     })
     // 双击收尾（测距中）：保留结果。click 里已对 <300ms 第二记做去抖，不会多加一个点。
-    map.on('dblclick', (e) => {
-      if (!measuringRef.current) return
-      e.originalEvent?.preventDefault()
-      lastMeasureClick.current = 0
-      finishMeasure()
-    })
+    map.on('dblclick', (e) => { measure.onDblClick(e) })
     // 测距键盘：Enter 收尾保留结果，Esc 丢弃并退出测距。
-    const onMeasureKey = (e: KeyboardEvent): void => {
-      if (!measuringRef.current) return
-      if (e.key === 'Escape') { e.preventDefault(); discardMeasure() }
-      else if (e.key === 'Enter') { e.preventDefault(); finishMeasure() }
-    }
+    // 测距键盘：Enter 收尾保留结果，Esc 丢弃并退出测距。
+    const onMeasureKey = (e: KeyboardEvent): void => { measure.onKeyDown(e) }
     window.addEventListener('keydown', onMeasureKey)
 
     const onResize = () => map.resize()
@@ -1244,298 +541,8 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       if (fit) fitToGeoJSON(map, geojson)
     }
 
-    // 同步图层注册表：移除消失的层、按 rev 变更拉全量并 addSource/addLayer、
-    // 纯可见性切换走 setLayoutProperty（不重拉数据）。dataset 层由现有 data-points 处理。
-    const syncLayers = async (map: MapLibreMap, summaries: LayerSummary[], force = false): Promise<void> => {
-      const seen = gisSeen.current
-      const current = new Set(summaries.map((s) => s.id))
-      try {
-        // 1) 移除已从注册表消失的层（含聚合层 / 热力层 / 蜂窝层 / deck 出图层）
-        for (const id of Object.keys(seen)) {
-          if (id === 'dataset' || current.has(id)) continue
-          for (const suffix of ALL_RENDER_SUFFIXES) {
-            const r = RID(id, suffix)
-            if (map.getLayer(r)) map.removeLayer(r)
-          }
-          if (map.getSource(SRC(id))) map.removeSource(SRC(id))
-          if (map.getSource(SRC_HEX(id))) map.removeSource(SRC_HEX(id))
-          clusterLayerIds.current.delete(RID(id, 'cluster'))
-          deckRef.current?.removeOut(id)
-          delete dataCache.current[id]
-          delete seen[id]
-        }
-        // 2) upsert / 变更 / 可见性
-        // ⚠️ 每个图层独立 try/catch：切底图（setStyle）后重建期间某个图层失败不应中断其余图层
-        // （此前整体 try/catch 会因一个图层异常静默吞掉整轮，导致 OpenFreeMap 等矢量样式切完后图层全部消失）。
-        for (const s of summaries) {
-          try {
-          const prev = seen[s.id]
-          // 内容形态签名：rev 之外还要能感知「同 id 换了数据集/几何/渲染形态」，否则替换 dataset 时常漏变更。
-          const shape = layerShapeKey(s)
-          if (s.id === 'dataset') {
-            // 数据集展示方式：points 且点数据集走 data-points 圆点；线/面数据集不走 data-points——
-            // maplibre circle 层会给 LineString/Polygon 的每个顶点画圆（表现为散点），必须按几何渲染。
-            // 注意：切底图 setStyle 后 data-points 层可能尚未重建，所有 setLayout/setPaint 调用先判存在，避免抛错中断整轮。
-            const dmode: DisplayMode = s.mode ?? 'points'
-            const dstyle = JSON.stringify({ r: s.pointRadius, sw: s.pointStrokeWidth, fc: s.fillColor })
-            const isPointData = (s.geometryTypes ?? []).length > 0
-              && (s.geometryTypes ?? []).every((t) => t === 'Point' || t === 'MultiPoint')
-            // data-points 圆点只服务「maplibre 渲染的点数据集」；renderer=deck（>10 万，走 arrow 大数据）的点/线/面
-            // 数据集 → 落到下方普通路径走 raw deck / /webgis/arrow（避免 data-points 只画抽样 + 无法分级）。
-            if (dmode === 'points' && isPointData && s.renderer !== 'deck') {
-              if (map.getLayer('data-points')) {
-                // 恒按 visible 设可见性：从线/面数据集切回点数据集时要恢复显示（此前可能被隐藏）
-                map.setLayoutProperty('data-points', 'visibility', s.visible ? 'visible' : 'none')
-                // 数据集点样式跟随图层（颜色 + 点位大小 + 描边），此前 data-points 写死蓝色、半径 5
-                if (prev?.color !== s.color || prev?.style !== dstyle) {
-                  map.setPaintProperty('data-points', 'circle-color', s.fillColor ?? s.color)
-                  map.setPaintProperty('data-points', 'circle-radius', s.pointRadius ?? 5)
-                  map.setPaintProperty('data-points', 'circle-stroke-width', s.pointStrokeWidth ?? 1)
-                  map.setPaintProperty('data-points', 'circle-stroke-color', s.color)
-                }
-              }
-              // 清理 plane/hex/deck 模式残留的渲染层（gis-dataset-heat / gis-dataset-hex / deck）
-              for (const suffix of ALL_RENDER_SUFFIXES) {
-                const r = RID('dataset', suffix)
-                if (map.getLayer(r)) map.removeLayer(r)
-              }
-              if (map.getSource(SRC('dataset'))) map.removeSource(SRC('dataset'))
-              if (map.getSource(SRC_HEX('dataset'))) map.removeSource(SRC_HEX('dataset'))
-              deckRef.current?.removeOut('dataset')
-              seen[s.id] = { rev: s.rev, visible: s.visible, mode: s.mode, color: s.color, style: dstyle, shape }
-              continue
-            }
-            // 线/面数据集 或 plane/hex：隐藏 data-points（避免线/面顶点被画成圆点），
-            // 渲染交给下方普通路径按几何/模式处理（线 → gis-dataset-line、面 → gis-dataset-fill、plane/hex 热力照常）。
-            if (map.getLayer('data-points')) {
-              map.setLayoutProperty('data-points', 'visibility', 'none')
-              if (prev?.color !== s.color || prev?.style !== dstyle) {
-                map.setPaintProperty('data-points', 'circle-color', s.fillColor ?? s.color)
-                map.setPaintProperty('data-points', 'circle-radius', s.pointRadius ?? 5)
-                map.setPaintProperty('data-points', 'circle-stroke-width', s.pointStrokeWidth ?? 1)
-                map.setPaintProperty('data-points', 'circle-stroke-color', s.color)
-              }
-            }
-          }
-          const kinds = renderKinds(s.geometryTypes)
-          const isPointLayer = kinds.includes('circle')
-          // 展示方式：非点图层也可走 deck 出图（弧线/轨迹需线、围墙需面）；plane/hex 仍仅点图层有意义。
-          const mode: DisplayMode = (s.mode && (DECK_MODES.has(s.mode) || isPointLayer)) ? s.mode : 'points'
-          const isDeckMode = DECK_MODES.has(mode)
-          // 仅点要素、且为原始点模式时走 supercluster 聚合。
-          const clustered = isPointLayer && s.cluster && mode === 'points'
-          // force（换底图/样式重建）：全部当作数据+模式变更重建，但跳过镜头 fit
-          const dataChanged = force || !prev || prev.rev !== s.rev || (prev.shape !== undefined && prev.shape !== shape)
-          const modeChanged = force || (!!prev && prev.mode !== s.mode)
-          const paramsChanged = force || (!!prev && prev.params !== (s.modeParams ? JSON.stringify(s.modeParams) : ''))
-          const colorChanged = force || (!!prev && prev.color !== s.color)
-          // 样式（点位大小/描边/填充色）变更也要触发重建
-          const styleKey = JSON.stringify({ r: s.pointRadius, sw: s.pointStrokeWidth, fc: s.fillColor })
-          const styleChanged = force || (!!prev && prev.style !== styleKey)
-          const style: RenderStyle = { color: s.color, pointRadius: s.pointRadius, pointStrokeWidth: s.pointStrokeWidth, fillColor: s.fillColor }
-          // >10 万点图层走「deck 原始数据」路径（host renderer=deck；mode 为原始点时适用，plane/hex 仍走 maplibre）。
-          const isRawDeck = s.renderer === 'deck' && mode === 'points'
-          // deck 懒加载：首个「需 deck 渲染」的图层（deck 出图 / raw 原始数据路径）出现时才拉 deck.js 建 controller。
-          // 放单图层 try 内：加载失败只跳本图层、不中断其余图层；记 seen 防每轮 poll 反复尝试，下轮由图层状态变更驱动重试。
-          if ((isDeckMode || isRawDeck) && !deckRef.current) {
-            const d = await ensureDeckForMap(map)
-            if (!d) {
-              seen[s.id] = prev ?? {
-                rev: s.rev,
-                visible: s.visible,
-                mode: s.mode,
-                color: s.color,
-                params: s.modeParams ? JSON.stringify(s.modeParams) : '',
-                style: styleKey,
-                shape,
-              }
-              continue
-            }
-          }
-          if (dataChanged || modeChanged || paramsChanged || colorChanged || styleChanged) {
-            // 数据优先取客户端缓存（切换展示方式免重新请求）；首次出现才拉全量。
-            // Arrow 原始数据路径不拉 geojson 抽样，直接走 /webgis/arrow 二进制。
-            let geojson: FeatureCollection | null = null
-            const useArrow = isRawDeck && s.dataFormat === 'arrow'
-            const cached = dataCache.current[s.id]
-            if (!useArrow) {
-              if (cached) {
-                geojson = cached
-              } else {
-                if (!dataChanged) {
-                  // mode 变了但还没缓存过数据（理论上不会发生）→ 等下一轮再拉
-                  continue
-                }
-                const res = await fetch(sessionUrl(sessionRef.current, `/webgis/gis-result?id=${encodeURIComponent(s.id)}`), { cache: 'no-store' })
-                if (!res.ok) continue
-                geojson = await res.json()
-                dataCache.current[s.id] = geojson as FeatureCollection
-              }
-            }
-            // 结构/选项变更（含 cluster 开关 / 展示方式 / 出图参数）→ 整组重建（maplibre 层或 deck 出图层）
-            if (isDeckMode) {
-              // deck 出图：切形态前清掉同 id 的 raw（arrow/geojson）状态，防止 syncRawTiers 把 raw 层画回 deck 出图之上
-              deckRef.current?.clearRaw(s.id)
-              // deck 出图：清掉 maplibre 残留层后注册进 deck 注册表
-              for (const suffix of ALL_RENDER_SUFFIXES) {
-                const r = RID(s.id, suffix)
-                if (map.getLayer(r)) map.removeLayer(r)
-              }
-              if (map.getSource(SRC(s.id))) map.removeSource(SRC(s.id))
-              if (map.getSource(SRC_HEX(s.id))) map.removeSource(SRC_HEX(s.id))
-              clusterLayerIds.current.delete(RID(s.id, 'cluster'))
-              deckRef.current?.upsertOut({
-                id: s.id,
-                mode: mode as DeckChartMode,
-                geojson: geojson as FeatureCollection,
-                bbox: s.bbox,
-                color: s.fillColor ?? s.color,
-                visible: s.visible,
-                params: s.modeParams,
-              })
-            } else if (isRawDeck) {
-              // deck 原始数据路径：清掉 maplibre 残留层后注册进 raw deck（Arrow 或 geojson 原始点）。
-              // 非数据变更（颜色/样式）用缓存重建，避免重新拉 Arrow；数据变更/首次才拉。
-              // ⚠️ 不调 removeOut（controller 里会清掉 raw 表缓存，导致 rebuildRaw 拿不到表）。
-              // 切形态前清掉同 id 的 deck 出图注册表（trips 动画等不会把旧形态画回去）。
-              deckRef.current?.clearOut(s.id)
-              for (const suffix of ALL_RENDER_SUFFIXES) {
-                const r = RID(s.id, suffix)
-                if (map.getLayer(r)) map.removeLayer(r)
-              }
-              if (map.getSource(SRC(s.id))) map.removeSource(SRC(s.id))
-              if (map.getSource(SRC_HEX(s.id))) map.removeSource(SRC_HEX(s.id))
-              clusterLayerIds.current.delete(RID(s.id, 'cluster'))
-              // 仅当该 id 已有 raw 注册表且本轮只是样式/可见性变化时才用缓存重建；
-              // 否则一律 upsert（新增/换数据时旧形态没有 raw 表，rebuild 会空转 → 新层不显示）。
-              if (deckRef.current?.hasRaw(s.id) && !dataChanged) {
-                deckRef.current.rebuildRaw(s)
-              } else {
-                await deckRef.current?.upsertRaw(s, geojson)
-              }
-            } else {
-              // maplibre 渲染：清掉 deck 出图层残留后重建 source + layers
-              if (!geojson) continue // 非 Arrow 路径下 geojson 必然已取到（上面 useArrow=false 分支）
-              deckRef.current?.removeOut(s.id)
-              for (const suffix of ALL_RENDER_SUFFIXES) {
-                const r = RID(s.id, suffix)
-                if (map.getLayer(r)) map.removeLayer(r)
-              }
-              if (map.getSource(SRC(s.id))) map.removeSource(SRC(s.id))
-              if (map.getSource(SRC_HEX(s.id))) map.removeSource(SRC_HEX(s.id))
-              clusterLayerIds.current.delete(RID(s.id, 'cluster'))
-              if (mode === 'points') {
-                if (clustered) {
-                  map.addSource(SRC(s.id), { type: 'geojson', data: geojson, cluster: true, clusterRadius: 50, clusterMaxZoom: 16 })
-                  map.addLayer(makeClusterLayer(RID(s.id, 'cluster'), SRC(s.id), s.color))
-                  map.addLayer(makeClusterCountLayer(RID(s.id, 'cluster-count'), SRC(s.id)))
-                  clusterLayerIds.current.add(RID(s.id, 'cluster'))
-                  map.addLayer(makeRenderLayer(RID(s.id, 'circle'), SRC(s.id), 'circle', style, ['!', ['has', 'point_count']]))
-                } else {
-                  map.addSource(SRC(s.id), { type: 'geojson', data: geojson })
-                  for (const kind of kinds) {
-                    map.addLayer(makeRenderLayer(RID(s.id, kind), SRC(s.id), kind, style))
-                  }
-                  // 面描边宽度：fill 层自身边界只有 1px，粗描边需叠一个 line 层
-                  if (s.pointStrokeWidth !== undefined && kinds.includes('fill')) {
-                    map.addLayer({ id: RID(s.id, 'outline'), type: 'line', source: SRC(s.id), paint: { 'line-color': s.color, 'line-width': s.pointStrokeWidth } })
-                  }
-                }
-              } else if (mode === 'plane') {
-                // 平面热力图：maplibre 原生 heatmap 层（GPU 平滑热色，缩放零重算、流畅）
-                map.addSource(SRC(s.id), { type: 'geojson', data: geojson })
-                map.addLayer(makeHeatLayer(RID(s.id, 'heat'), SRC(s.id), maxDensityOf(geojson)))
-                // 立即套用可见性：新层默认可见，若图层处于隐藏态需同步（后续可见性块可能不触发）
-                map.setLayoutProperty(RID(s.id, 'heat'), 'visibility', s.visible ? 'visible' : 'none')
-              } else {
-                // 蜂窝热力图：客户端把点归并成六边形（hexbinFC），fill-extrusion 柱渲染
-                const hex = hexbinFC(geojson)
-                map.addSource(SRC_HEX(s.id), { type: 'geojson', data: hex })
-                map.addLayer(makeHexLayer(RID(s.id, 'hex'), SRC_HEX(s.id), maxDensityOf(hex), hexHeightFor(s.bbox)))
-                map.setLayoutProperty(RID(s.id, 'hex'), 'visibility', s.visible ? 'visible' : 'none')
-              }
-            }
-            if (!prev && !force) {
-              // 首次出现 fit 到图层范围：Arrow 图层没有 geojson，用摘要 bbox。
-              if (geojson) await fitToGeoJSON(map, geojson)
-              else if (s.bbox) map.fitBounds(s.bbox, { padding: 60, maxZoom: 16 })
-            }
-          }
-          if (isDeckMode) {
-            // deck 出图可见性：更新注册表里的 spec 可见性（deck 层 visible 由图层实例控制）；
-            // spec 从当前摘要 + dataCache 重建（与上次 upsert 内容等价，只有变化才重建）。
-            const ex = deckRef.current?.outVisibleOf(s.id)
-            if (ex !== undefined && ex !== s.visible) {
-              deckRef.current?.upsertOut({
-                id: s.id,
-                mode: mode as DeckChartMode,
-                geojson: dataCache.current[s.id] as FeatureCollection,
-                bbox: s.bbox,
-                color: s.fillColor ?? s.color,
-                visible: s.visible,
-                params: s.modeParams,
-              })
-            }
-          } else if (isRawDeck) {
-            // deck 原始数据路径可见性：更新 raw spec + 用缓存数据重建
-            const rv = deckRef.current?.rawVisibleOf(s.id)
-            if (rv !== undefined && rv !== s.visible) {
-              deckRef.current?.rebuildRaw(s)
-            }
-          } else {
-            const renderIds = mode === 'points'
-              ? (clustered ? [RID(s.id, 'cluster'), RID(s.id, 'cluster-count'), RID(s.id, 'circle')] : kinds.map((k) => RID(s.id, k)))
-              : mode === 'plane'
-                ? [RID(s.id, 'heat')]
-                : [RID(s.id, 'hex')]
-            if (!prev || prev.visible !== s.visible) {
-              for (const r of renderIds) {
-                if (map.getLayer(r)) map.setLayoutProperty(r, 'visibility', s.visible ? 'visible' : 'none')
-              }
-            }
-          }
-          seen[s.id] = { rev: s.rev, visible: s.visible, mode: s.mode, color: s.color, params: s.modeParams ? JSON.stringify(s.modeParams) : '', style: styleKey, shape }
-          } catch (err) {
-            // 单图层失败不中断其余图层；记录错误便于排查（本轮跳过，下轮 poll 会重试）。
-            console.warn('[MapView] syncLayers 图层处理失败，跳过', s.id, err)
-          }
-        }
-      } catch (err) {
-        // 样式未就绪 / 网络抖动：本轮跳过，下一轮重试
-        console.warn('[MapView] syncLayers 整轮失败', err)
-      }
-    }
 
     // 换底图（setStyle）后：样式 load 时把数据图层补挂回来——data-points、叠加服务、结果图层。
-    // 复用 dataCache 不重拉数据、跳过 fit 不跳镜头。styleRebuildPending 去重。
-    const rebuildAfterStyleLoad = async (map: MapLibreMap): Promise<void> => {
-      if (styleRebuildPending.current) return
-      styleRebuildPending.current = true
-      try {
-        ensureDataLayers(map)
-        // 测距源/层常驻：切底图整重建后补齐；有已提交顶点/进行中则还原几何与预览。
-        ensureMeasureLayers(map)
-        if (measuringRef.current || measurePts.current.length > 0) {
-          writeMeasure()
-          if (!measuringRef.current) writeMeasurePreview(null)
-        }
-        gisSeen.current = {}
-        clusterLayerIds.current = new Set()
-        syncOverlays(map, overlaysRef.current)
-        if (datasetSeen.current) {
-          try { await loadDataset(map, false) } catch { /* 数据集加载失败忽略，下一轮 poll 补齐 */ }
-        }
-        await syncLayers(map, lastLayersRef.current, true)
-        // setStyle 后 deck 出图需重新注入（deck 在 styledata 自动重注入，但注册表里的图层要主动推回，
-        // 防止矢量底图切换后弧线/轨迹/围墙/辐射等 deck 出图丢失）。
-        deckRef.current?.syncLayers()
-      } catch (err) {
-        // 样式未就绪等：忽略，下一轮 poll 补齐
-        console.warn('[MapView] rebuildAfterStyleLoad 失败', err)
-      } finally {
-        styleRebuildPending.current = false
-      }
-    }
     const mountMap = mapRef.current
     if (mountMap) mountMap.on('style.load', () => { void rebuildAfterStyleLoad(mountMap) })
     // ⚠️ 底图切换的 setStyle 已统一带 { diff: false } 强制整样式重建（见 applyBaseMap），会触发 style.load。
@@ -1547,6 +554,19 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       }
     })
 
+    // 图层同步器（从本组件拆出，ref 原样注入；见 layer-sync.ts）。
+    const layerSync = createLayerSync({
+      gisSeen, dataCache, renderCache, clusterLayerIds, styleRebuildPending, datasetSeen,
+      overlaysRef, deckRef, mapRef, sessionRef,
+      ensureDeck: ensureDeckForMap,
+      restoreMeasure: () => measure.restoreIfActive(),
+      loadDataset,
+      lastLayersRef,
+    })
+    const syncLayers = async (map: MapLibreMap, summaries: LayerSummary[], force = false): Promise<void> => {
+      await layerSync.syncLayers(map, summaries, force)
+    }
+    const rebuildAfterStyleLoad = (map: MapLibreMap): Promise<void> => layerSync.rebuildAfterStyleLoad(map)
     const poll = async (): Promise<void> => {
       if (inFlight) return
       inFlight = true
@@ -1686,7 +706,7 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     }
 
     // SSE 状态推送订阅：host 写状态 → 即时触发一轮 poll（交互秒达，主通道）。
-    // 3s 心跳轮询只作掉线/SSE 不可用/配置项(baseTileUrl)变更的兜底（EventSource 断线自动重连；
+    // 1s 心跳轮询只作掉线/SSE 不可用/配置项(baseTileUrl)变更的兜底（EventSource 断线自动重连；
     // 指纹短路让空转心跳几乎零成本）。切回前台立即补一轮，避免隐藏期被浏览器节流的更新滞后。
     let eventSource: EventSource | null = null
     if (typeof EventSource !== 'undefined') {
@@ -1701,7 +721,7 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       if (document.visibilityState === 'visible') void poll()
     }
     document.addEventListener('visibilitychange', onVisible)
-    const timer = setInterval(poll, 3000)
+    const timer = setInterval(poll, 1000)
     poll()
     return () => {
       cancelled = true
@@ -1717,9 +737,9 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       <div className={styles.mapBottomLeft}>
         <button
           type="button"
-          className={`${styles.measureBtn}${measuring ? ` ${styles.measureBtnActive}` : ''}`}
+          className={`${styles.measureBtn}${measure.measuring ? ` ${styles.measureBtnActive}` : ''}`}
           title={t('measure.titleHint')}
-          onClick={toggleMeasure}
+          onClick={measure.toggle}
         >
           {t('measure.title')}
         </button>
@@ -1733,39 +753,39 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
           t={t}
         />
       </div>
-      {(measuring || measureDone) && (
+      {(measure.measuring || measure.measureDone) && (
         <div className={styles.measureReadout} role="status">
-          {measuring && (
+          {measure.measuring && (
             <div className={styles.measureHint}>
-              {measurePts.current.length === 0 ? t('measure.hintStart') : t('measure.hintEnd')}
+              {measure.vertexCount() === 0 ? t('measure.hintStart') : t('measure.hintEnd')}
             </div>
           )}
-          {measureClosed && measurePts.current.length >= 3 ? (
+          {measure.measureClosed && measure.vertexCount() >= 3 ? (
             // 闭合为面：给周长 + 面积
             <>
               <div className={styles.measureSegRow}>
-                {t('measure.perimeter')} <b className={styles.measureAmber}>{measurePerimeterText()}</b>
+                {t('measure.perimeter')} <b className={styles.measureAmber}>{measure.perimeterText()}</b>
               </div>
               <div className={styles.measureTotal}>
-                {t('measure.area')} <b>{measureAreaText()}</b>
+                {t('measure.area')} <b>{measure.areaText()}</b>
               </div>
             </>
           ) : (
             // 开环折线：逐段 + 累计长度（测量中带实时预览段）
             <>
-              {measureSegs.length > 0 && (
+              {measure.measureSegs.length > 0 && (
                 <div className={styles.measureSegs}>
-                  {measureSegs.map((m, i) => (
+                  {measure.measureSegs.map((m, i) => (
                     <div key={i} className={styles.measureSegRow}>
                       {t('measure.seg', { n: i + 1 })} {formatDistance(m)}
                     </div>
                   ))}
                 </div>
               )}
-              {measureLengthText() !== '' && (
+              {measure.lengthText() !== '' && (
                 <div className={styles.measureTotal}>
-                  {t('measure.total')} <b>{measureLengthText()}</b>
-                  <span ref={measurePreviewEl} className={styles.measurePreview} />
+                  {t('measure.total')} <b>{measure.lengthText()}</b>
+                  <span ref={measure.previewEl} className={styles.measurePreview} />
                 </div>
               )}
             </>
