@@ -60,21 +60,21 @@ test('registerGeoTools：经 inject 注册全局工具纪律系统提示段（#6
   assert.ok(defs.length >= 35)
 })
 
-test('全部 38 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统计 + 3 展示方式/改色 + 3 属性编辑）', () => {
+test('全部 42 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统计 + 4 指数 + 3 展示方式/改色 + 3 属性编辑）', () => {
   const { defs } = setup()
   const names = defs.map((d) => d.name).sort()
   const expected = [
     'webgis_add_column', 'webgis_add_sequence', 'webgis_attribute_join', 'webgis_average_nearest_neighbor', 'webgis_bounding_box',
     'webgis_buffer', 'webgis_centroids', 'webgis_clear_layers', 'webgis_clip',
     'webgis_convex_hull', 'webgis_difference', 'webgis_dissolve', 'webgis_explode',
-    'webgis_feature_summary', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
+    'webgis_feature_summary', 'webgis_getis_ord', 'webgis_gini', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
     'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
     'webgis_reproject', 'webgis_select_by_location', 'webgis_select_by_value',
     'webgis_set_attribute', 'webgis_set_heatmap_mode', 'webgis_set_layer_color', 'webgis_set_layer_style',
     'webgis_set_layer_visibility',
     'webgis_set_render_mode',
-    'webgis_simplify', 'webgis_smooth',
-    'webgis_spatial_join', 'webgis_union', 'webgis_voronoi',
+    'webgis_shannon', 'webgis_simplify', 'webgis_smooth',
+    'webgis_spatial_join', 'webgis_stat_inspect', 'webgis_union', 'webgis_voronoi',
   ].sort()
   assert.deepEqual(names, expected)
 })

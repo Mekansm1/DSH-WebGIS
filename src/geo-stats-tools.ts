@@ -33,7 +33,7 @@ const WEIGHT_PARAMS = {
 } as const
 
 /** 数值字段体检结果（只含判断，不含原始数据）。 */
-interface FieldReport {
+export interface FieldReport {
   field: string
   valid: number
   nullRate: number
@@ -49,8 +49,9 @@ interface FieldReport {
 /** 标识列/编码列（不推荐用于统计）。 */
 const IDENT_RE = /^(objectid|fid|gid|ogc_fid|id|uuid|.*_id|.*id|code|.*code|.*编码|.*代码|.*编号)$/i
 
-/** 扫描图层属性里的数值字段（含空值率/分布/唯一值），并给出推荐与排除原因。 */
-function inspectFields(fc: FeatureCollection): { recommended: FieldReport[]; excluded: FieldReport[] } {
+/** 扫描图层属性里的数值字段（含空值率/分布/唯一值），并给出推荐与排除原因。
+ *  （统计指数目录 geo-indices.ts 的通用体检复用它——只判定、不计算。） */
+export function inspectFields(fc: FeatureCollection): { recommended: FieldReport[]; excluded: FieldReport[] } {
   const feats = fc.features
   const n = feats.length
   const keys = new Set<string>()
@@ -104,7 +105,7 @@ function inspectFields(fc: FeatureCollection): { recommended: FieldReport[]; exc
 }
 
 /** 一行字段摘要（给用户看的确认卡片用）。 */
-function fieldLine(r: FieldReport): string {
+export function fieldLine(r: FieldReport): string {
   return `${r.field}（有效 ${r.valid}，均值 ${r.mean}，标准差 ${r.std}，唯一值 ${r.unique}）`
 }
 

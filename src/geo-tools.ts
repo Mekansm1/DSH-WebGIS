@@ -21,6 +21,7 @@ import { registerOverlayTools } from './geo-overlay-tools.js'
 import { registerQueryTools } from './geo-query-tools.js'
 import { registerVectorTools } from './geo-vector-tools.js'
 import { registerStatsTools } from './geo-stats-tools.js'
+import { registerIndexTools } from './geo-index-tools.js'
 import { registerLayerTools } from './geo-layer-tools.js'
 import { registerInfoTools } from './geo-info-tools.js'
 
@@ -81,6 +82,8 @@ export function registerGeoTools(
   registerQueryTools(ctx, rt)
   registerVectorTools(ctx, rt)
   registerStatsTools(ctx, rt)
+  // 统计指数目录（通用体检 + 基尼/香农/Gi*）：纯新增，不改上面已有的空间统计工具。
+  registerIndexTools(ctx, rt)
   registerLayerTools(ctx, rt)
   registerInfoTools(ctx, rt)
 }

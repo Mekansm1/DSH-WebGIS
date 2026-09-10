@@ -238,3 +238,33 @@ test('opLocalMoranI / opMoranI: 点图层用 knn 可算；无相邻关系时报�
   assert.equal(none.ok, false)
   if (!none.ok) assert.match(none.message, /没有相邻关系/)
 })
+
+test('opMoranI / opLocalMoranI: 字段含空值必须明确报错——不能把 null 当 0 悄悄算（回归）', () => {
+  const withNull = featureCollection([
+    point([0, 0], { v: 10 }), point([0.01, 0], { v: 11 }), point([0.02, 0], { v: null }),
+    point([0.03, 0], { v: 9 }),
+  ])
+  const g = opMoranI(withNull, 'v', { permutations: 0 })
+  assert.equal(g.ok, false)
+  if (!g.ok) assert.match(g.message, /空值或非数值/)
+
+  const l = opLocalMoranI(withNull, 'v', { permutations: 99, seed: 1 })
+  assert.equal(l.ok, false)
+  if (!l.ok) assert.match(l.message, /空值或非数值/)
+
+  // 空串与布尔同样不能被当成 0
+  const weird = featureCollection([
+    point([0, 0], { v: 10 }), point([0.01, 0], { v: '' }), point([0.02, 0], { v: true }),
+    point([0.03, 0], { v: 9 }),
+  ])
+  const r = opMoranI(weird, 'v', { permutations: 0 })
+  assert.equal(r.ok, false)
+  if (!r.ok) assert.match(r.message, /2\/4 个空值或非数值/)
+
+  // 全为有效数值时照常可算（未误伤正常路径）
+  const ok = opMoranI(featureCollection([
+    point([0, 0], { v: 10 }), point([0.01, 0], { v: 11 }), point([0.02, 0], { v: 9 }),
+    point([0.03, 0], { v: 8 }),
+  ]), 'v', { type: 'distance', distanceMeters: 2000, permutations: 0 })
+  assert.equal(ok.ok, true)
+})

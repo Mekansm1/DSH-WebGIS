@@ -12,7 +12,7 @@ import { intersect as turfIntersect } from '@turf/intersect'
 import { bboxOf, geometryTypesOf } from './geo-processing.js'
 
 /** 核密度网格上限（防 runaway）。 */
-const MAX_GRID_CELLS = 40000
+export const MAX_GRID_CELLS = 40000
 
 const DEG_LAT_PER_M = 1 / 110540
 function degLonPerM(lat: number): number {
@@ -338,8 +338,23 @@ function standardize(
   feats: Feature[],
   field: string,
 ): { ok: true; xs: number[]; z: number[]; s2: number; mean: number } | { ok: false; message: string } {
-  const xs = feats.map((f) => Number(f.properties?.[field]))
-  if (xs.some((x) => !Number.isFinite(x))) return { ok: false, message: `字段 ${field} 必须为数值` }
+  // ⚠ 不能直接 Number(v)：Number(null) / Number('') / Number(false) 都是 0，
+  // 会让空值、空串、布尔悄悄当成 0 参与计算，得出「看起来正常但错」的结果。
+  const xs: number[] = []
+  let missing = 0
+  for (const f of feats) {
+    const v = f.properties?.[field]
+    const x = typeof v === 'number' ? v : v == null || v === '' || typeof v === 'boolean' ? Number.NaN : Number(v)
+    if (Number.isFinite(x)) xs.push(x)
+    else { xs.push(Number.NaN); missing++ }
+  }
+  if (missing > 0) {
+    return {
+      ok: false,
+      message: `字段 ${field} 有 ${missing}/${feats.length} 个空值或非数值：空间自相关要求每个要素都有值`
+        + '（请先用 webgis_select_by_value / webgis_filter_layer 过滤掉这些要素，或改用别的字段）',
+    }
+  }
   const n = xs.length
   const mean = xs.reduce((a, b) => a + b, 0) / n
   const z = xs.map((x) => x - mean)
