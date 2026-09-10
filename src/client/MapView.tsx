@@ -80,11 +80,13 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
   const closePopup = (): void => {
     popupRef.current?.remove()
     popupRef.current = null
-    // 关闭浮窗/空点击/右键时一并清掉点击高亮
+    // 关闭浮窗/空点击/右键时一并清掉点击高亮（maplibre 的 gis-sel 与 deck 侧各一份：
+    // 点中的要素由哪个渲染器画就由哪个高亮，两处都要清，否则会残留上一次的高亮）。
     const m = mapRef.current
     if (m) {
       try { clearMapSelection(m) } catch { /* 样式未就绪/已卸载：忽略 */ }
     }
+    deckRef.current?.clearSelection()
   }
   /** 出图结果上传 host（「导出并给 AI 看」；带 AI 请求的 seq 回传供等待中的 webgis_export_map 收）。失败静默（本地下载仍可用）。 */
   const postExportImage = async (dataUrl: string, width: number, height: number, title: string): Promise<void> => {
@@ -318,7 +320,7 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
             closePopup()
             const url = sessionUrl(sessionRef.current, `/webgis/arrow-rid?id=${encodeURIComponent(deckRawId)}&rid=${rid}`)
             void fetch(url, { cache: 'no-store' })
-              .then((r) => (r.ok ? (r.json() as Promise<{ ok?: boolean; name?: string; message?: string; attrs?: Record<string, unknown> }>) : null))
+              .then((r) => (r.ok ? (r.json() as Promise<{ ok?: boolean; name?: string; message?: string; attrs?: Record<string, unknown>; geometry?: unknown }>) : null))
               .then((d) => {
                 if (!d?.ok || !d.attrs) {
                   if (d?.message) console.warn('[MapView] Arrow 行号属性未命中', deckRawId, 'index', deckHit.index, 'rid', rid, '|', d.message)
@@ -328,10 +330,14 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
                   id: null,
                   layer: d.name ?? deckRawId,
                   source: 'duckdb',
-                  geometryType: null,
+                  geometryType: d.geometry && typeof d.geometry === 'object' ? ((d.geometry as { type?: string }).type ?? null) : null,
                   properties: d.attrs,
                 }
+                closePopup()
                 showFeaturePopup(feature, { lng, lat })
+                // deck 图层（arrow 大图层）也要和 maplibre 图层一样高亮：host 已随属性返回该行几何。
+                // ⚠️ 走 deck 侧高亮（不是 gis-sel）：maplibre 图层压不过 deck 的 group 自定义层。
+                if (d.geometry) deckRef.current?.setSelection(d.geometry)
                 recordPick(map, lng, lat, [feature], undefined, sessionRef.current)
               })
               .catch((err) => console.warn('[MapView] Arrow 行号属性查询失败', deckRawId, err))
@@ -364,7 +370,10 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
                 geometryType: 'Point',
                 properties: d.attrs,
               }
+              closePopup()
               showFeaturePopup(feature, { lng: dlon, lat: dlat })
+              // 与 maplibre 图层一致：deck 命中的点要素也高亮（用 arrow 表里的精确坐标）
+              deckRef.current?.setSelection({ type: 'Point', coordinates: [dlon, dlat] })
               recordPick(map, dlon, dlat, [feature], undefined, sessionRef.current)
             })
             .catch((err) => console.warn('[MapView] Arrow 属性查询失败', deckRawId, err))
@@ -389,6 +398,8 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
             }
             closePopup()
             showFeaturePopup(feature, { lng, lat })
+            // 与 maplibre 图层一致：geojson 原始 deck 层用要素几何高亮（面填充/线描边/点圆点）
+            deckRef.current?.setSelection(f.geometry)
             recordPick(map, lng, lat, [feature], undefined, sessionRef.current)
           }
           return
@@ -461,6 +472,9 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
           return
         }
         showFeaturePopup(topPayload, e.lngLat)
+        // 普通（未瘦身）图层：同样高亮被点几何——点要素画圆点、线/面画描边（此前只有瘦身层才高亮，
+        // 导致「点的点选完全看不出高亮」）。
+        setMapSelection(map, topGeometry)
         recordPick(map, lng, lat, payloads, undefined, sessionRef.current)
         return
       }

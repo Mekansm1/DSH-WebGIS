@@ -314,18 +314,31 @@ export const handleArrowRid: RouteHandler = (req, res, url, _pathname, _sessionI
       }
       if (!Number.isInteger(ridRaw)) return void jsonError(res, 400, 'rid 参数非法')
       const engine = getDuckDb()
+      const g = layer.duckGeom
+      // 同时取回该行几何（ST_AsGeoJSON，已归一到 4326）：客户端用它做「与 maplibre 图层一致」的点击高亮。
+      let geomSql: string
+      try {
+        geomSql = `ST_AsGeoJSON(${buildGeomExpr(g.column, g.format, g.sourceCrs)}) AS __geometry`
+      } catch {
+        geomSql = `ST_AsGeoJSON(${quoteIdent(g.column)}) AS __geometry`
+      }
       const rows = await engine.run(
-        `SELECT * FROM ${layer.duckTable} WHERE ${DUCK_RID} = ${ridRaw} LIMIT 1`,
+        `SELECT ${geomSql}, * FROM ${layer.duckTable} WHERE ${DUCK_RID} = ${ridRaw} LIMIT 1`,
       )
       const row = rows[0]
       if (!row) return void json(res, { ok: false, message: `未命中行号 ${ridRaw}（图层数据可能已变更）` })
       const attrs: Record<string, unknown> = {}
       for (const [k, v] of Object.entries(row)) {
-        // 跳过几何列与保留行号列本身（GEOMETRY 二进制/内部列不进属性浮窗）
-        if (k === layer.duckGeom.column || k === DUCK_RID) continue
+        // 跳过几何列、保留行号列与内部取回的几何串（几何/内部列不进属性浮窗）
+        if (k === g.column || k === DUCK_RID || k === '__geometry') continue
         attrs[k] = normalizeValue(v)
       }
-      json(res, { ok: true, id, name: layer.name, attrs })
+      let geometry: unknown = null
+      const rawGeom = row.__geometry
+      if (typeof rawGeom === 'string' && rawGeom) {
+        try { geometry = JSON.parse(rawGeom) } catch { geometry = null }
+      }
+      json(res, { ok: true, id, name: layer.name, attrs, ...(geometry ? { geometry } : {}) })
     } catch (err) {
       jsonError(res, 500, `行号属性查询失败: ${err instanceof Error ? err.message : String(err)}`)
     }

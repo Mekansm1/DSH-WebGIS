@@ -16,6 +16,7 @@ import { MapboxOverlay } from '@deck.gl/mapbox'
 import type { Layer as DeckLayer } from '@deck.gl/core'
 import { makeDeckChartLayers, tripsProgress, type DeckChartSpec } from '../deck-charts.js'
 import { makeGeoArrowLayers, makeRawGeojsonLayers, type GeoArrowSpec } from '../geoarrow-charts.js'
+import { makeSelectionLayers } from '../deck-selection.js'
 import { tableFromIPC, type Table } from 'apache-arrow'
 import { arrowCountForZoom, nextArrowCount } from '../../render-policy.js'
 import { sessionUrl } from '../sessionUrl.js'
@@ -64,6 +65,9 @@ export class DeckController {
   private deckRegistry: Record<string, DeckChartSpec> = {}
   /** deck 图层缓存：图层 id → 已构造的 deck 层实例（同步时整体下发，避免每帧重建）。 */
   private deckLayerCache: Record<string, DeckLayer[]> = {}
+  /** 点选高亮的几何（deck 命中的要素）。deck 层总在同步时**追加在最后**（最顶），
+   *  因为 maplibre 侧的 gis-sel 压不过 deck 的 group 自定义层。 */
+  private selection: unknown = null
   /** raw 原始数据路径（>10 万点/arrow 大文件）各层的运行时状态：id → RawLayerRuntime。
    *  收敛原先散落的 rawDeckRegistry/rawTableCache/rawTiers/rawFetching/lastViewKey/pendingRaw/
    *  lastAutoRetryAt/rawRetryTimers/windowOf/rawPrefetchCache/rawManaged——删除/清理只需删这一个条目。 */
@@ -135,11 +139,27 @@ export class DeckController {
     }
   }
 
-  /** 把注册表里的全部 deck 图层一次性下发到 MapboxOverlay（缺 overlay 则尝试惰性创建，避免注册早于 load 被丢）。 */
+  /** 把注册表里的全部 deck 图层一次性下发到 MapboxOverlay（缺 overlay 则尝试惰性创建，避免注册早于 load 被丢）。
+   *  点选高亮层追加在最后 → 渲染在其他 deck 图层之上（deck 内没有 moveLayer，靠数组次序）。 */
   syncLayers(): void {
     const overlay = this.ensureOverlay()
     if (!overlay) return
-    overlay.setProps({ layers: Object.values(this.deckLayerCache).flat() })
+    const layers = Object.values(this.deckLayerCache).flat()
+    const sel = makeSelectionLayers(this.selection)
+    overlay.setProps({ layers: sel.length ? [...layers, ...sel] : layers })
+  }
+
+  /** deck 命中要素的高亮（几何来自 arrow 行回查 / 本地 geojson 缓存）；空值等同清除。 */
+  setSelection(geometry: unknown): void {
+    this.selection = geometry ?? null
+    this.syncLayers()
+  }
+
+  /** 清除 deck 侧点选高亮（没有高亮时不重下发，避免空转）。 */
+  clearSelection(): void {
+    if (this.selection == null) return
+    this.selection = null
+    this.syncLayers()
   }
 
   /** 注册/更新一个 deck 出图层：登记 spec + 重建缓存 + 下发；轨迹层则启动动画循环。 */
@@ -499,6 +519,7 @@ export class DeckController {
     this.tripsRaf = null
     for (const rt of this.raw.values()) rt.clearRetryTimer()
     this.raw.clear()
+    this.selection = null
     this.lastLayers = []
     this.overlay = null
     this.map = null

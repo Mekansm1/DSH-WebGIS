@@ -26,6 +26,7 @@ import { geojsonKindOf, rawLineData, rawPointData, rawPolygonData } from './geoa
 import type { DisplayMode, FeaturePayload, LayerSummary } from './gis-types.js'
 import type { FeatureCollection } from 'geojson'
 import { formatArea, formatDistance, haversineM, pathMeters, polygonAreaM2, ringPathMeters, segmentMeters, type Pt } from './measure-utils.js'
+import { bringMapSelectionToTop } from './map-highlight.js'
 import { EMPTY_COLLECTION, baseStyle, fmtCoord, ensureDataLayers, ensureMeasureLayers, syncOverlays } from './map-style.js'
 import { useMapMeasure } from './use-map-measure.js'
 import { SEL_SRC, ensureSelLayers, clearMapSelection, setMapSelection } from './map-highlight.js'
@@ -357,6 +358,8 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
           // 样式未就绪 / 网络抖动：本轮跳过，下一轮重试
           console.warn('[MapView] syncLayers 整轮失败', err)
         }
+        // 本轮可能新建了数据层会盖住点击高亮 → 把 gis-sel 层重新置顶（无高亮时是空操作）。
+        bringMapSelectionToTop(map)
       }
 
       // 复用 dataCache 不重拉数据、跳过 fit 不跳镜头。styleRebuildPending 去重。
