@@ -36,6 +36,21 @@ export const handlePick: RouteHandler = (req, res, _url, _pathname, _sessionId, 
         return jsonError(res, 400, '坐标不合法')
       }
       const features = Array.isArray(data.features) ? data.features as PickFeature[] : []
+      // 渲染轻量层（/webgis/layer-render：只带 __layer/__i，无属性）上报的要素：
+      // 按行回填整行属性再落库——瘦身只优化「传输到浏览器」，AI 拿到的 pick 仍是完整字段。
+      // 找不到图层/行号越界则保留原样（只有 __layer/__i）。
+      const richFeatures = features.map((f) => {
+        const p = f.properties ?? {}
+        const lid = p['__layer']
+        const row = p['__i']
+        if (typeof lid !== 'string' || typeof row !== 'number') return f
+        const lyr = state.layers.find((l) => l.id === lid)
+        const feats = (lyr?.geojson?.features ?? []) as Array<{ properties?: Record<string, unknown> }>
+        const attrs = Number.isInteger(row) && row >= 0 && row < feats.length
+          ? feats[row]?.properties ?? {}
+          : {}
+        return { ...f, layer: lyr?.name ?? f.layer, properties: { ...attrs } }
+      })
       const screenshot = await parseScreenshot(api.ctx, data.screenshot)
       if (data.screenshot !== undefined && data.screenshot !== null && !screenshot) {
         api.ctx.logger.warn('[webgis] 截图解析/保存失败，仅记录坐标与要素')
@@ -45,7 +60,7 @@ export const handlePick: RouteHandler = (req, res, _url, _pathname, _sessionId, 
         : undefined
       // 捕获成功即视为该请求已被消费；等待中的工具靠 pick.captureSeq 识别本次结果。
       if (captureSeq !== undefined) state.capture = null
-      state.pick = { id: ++api.seqs.pickSeq, lng, lat, features, screenshot, ...(captureSeq !== undefined ? { captureSeq } : {}) }
+      state.pick = { id: ++api.seqs.pickSeq, lng, lat, features: richFeatures, screenshot, ...(captureSeq !== undefined ? { captureSeq } : {}) }
       json(res, { ok: true, id: state.pick.id })
     } catch (err) {
       jsonError(res, 400, err instanceof Error ? err.message : '请求体无效')

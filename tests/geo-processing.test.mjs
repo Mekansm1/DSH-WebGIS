@@ -411,3 +411,35 @@ test('makeResultLayer：多几何族（families>1）禁 Arrow，即使带 duckTa
   })
   assert.equal(single.dataFormat, 'arrow')
 })
+
+test('P0-1 回归：duck 大图层 bbox 用 fullBbox（全量真实范围），不用抽样 geojson 的 bbox', () => {
+  // 模拟：真实数据双簇（美国+中国），但上图抽样只落在 [0,0,10,10] 的抽样窗内。
+  const sampleOnly = featureCollection([square(0, 0, 10, 10)])
+  const full = [-130, -10, 135, 60]
+  const duckBig = makeResultLayer({
+    id: 'p0_1', name: 'P0-1', source: 'dataset',
+    geojson: sampleOnly,
+    duckTable: 'duckdb_z', duckGeom: { column: 'geom', format: 'geometry', sourceCrs: null },
+    totalCount: 200000,
+    fullBbox: full,
+  })
+  assert.deepEqual(duckBig.bbox, full, '有 fullBbox 时 bbox 必须代表完整数据，而非抽样 geojson')
+  assert.deepEqual(summarize(duckBig).bbox, full, 'summarize 把全量 bbox 透传给客户端（视口裁剪用它）')
+  // 不带 fullBbox（物化/未灌表图层）→ 保持 geojson bbox（geojson=全量，二者一致）
+  const noFull = makeResultLayer({
+    id: 'p0_1b', name: 'P0-1b', source: 'dataset',
+    geojson: sampleOnly,
+    duckTable: 'duckdb_w', duckGeom: { column: 'geom', format: 'geometry', sourceCrs: null },
+    totalCount: 200000,
+  })
+  assert.deepEqual(noFull.bbox, [0, 0, 10, 10])
+  // fullBbox=null（全表范围算不出）→ 回退抽样 bbox，不产出 null/Infinity
+  const nullFull = makeResultLayer({
+    id: 'p0_1c', name: 'P0-1c', source: 'dataset',
+    geojson: sampleOnly,
+    duckTable: 'duckdb_v', duckGeom: { column: 'geom', format: 'geometry', sourceCrs: null },
+    totalCount: 200000,
+    fullBbox: null,
+  })
+  assert.deepEqual(nullFull.bbox, [0, 0, 10, 10])
+})

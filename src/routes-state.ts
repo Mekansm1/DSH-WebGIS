@@ -73,6 +73,70 @@ export const handleGisResult: RouteHandler = (_req, res, url, _pathname, _sessio
   json(res, layer.geojson)
 }
 
+/** 属性表单页可取的最大行数（防一次响应过大）。 */
+const ATTR_PAGE_MAX = 500
+
+export const handleLayerAttrs: RouteHandler = (_req, res, url, _pathname, _sessionId, state) => {
+  // 属性抽屉分页取数：按 offset/limit 只返回一页属性行 + 全部列并集。
+  // 不再走 gis-result 整层 GeoJSON——几万行图层整层序列化 + 客户端 JSON.parse 会卡 3~5s，
+  // 而表格其实每屏只看 ~200 行。数据在宿主内存里就是 features 数组，切片零成本。
+  const id = url.searchParams.get('id') ?? ''
+  const layer = state.layers.find((l) => l.id === id)
+  if (!layer) return void notFound(res, 'unknown gis layer')
+  const feats = (layer.geojson?.features ?? []) as Array<{ properties?: Record<string, unknown> }>
+  const offsetRaw = Number(url.searchParams.get('offset'))
+  const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0
+  const limitRaw = Number(url.searchParams.get('limit'))
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(ATTR_PAGE_MAX, Math.floor(limitRaw)) : 200
+  // 列并集跨页稳定：每页都扫一遍 keys（几万行 JS 对象取键 <10ms）；行数才是主要负载，只切一页返回。
+  const keys = new Set<string>()
+  for (const f of feats) {
+    const p = f.properties
+    if (!p) continue
+    for (const k of Object.keys(p)) keys.add(k)
+  }
+  const rows = feats.slice(offset, offset + limit).map((f) => f.properties ?? {})
+  json(res, { total: feats.length, offset, limit, keys: [...keys], rows })
+}
+
+/** 渲染轻量 GeoJSON 里每个要素带的稳定行号属性名（指向 layer.geojson.features 数组下标）。 */
+export const LAYER_RENDER_ROW_KEY = '__i'
+
+/** 渲染轻量 GeoJSON 里标记所属图层 id 的属性名（客户端点击据此调 /webgis/layer-row）。 */
+export const LAYER_RENDER_ID_KEY = '__layer'
+
+export const handleLayerRender: RouteHandler = (_req, res, url, _pathname, _sessionId, state) => {
+  // maplibre 显示的「渲染版」GeoJSON：只带几何 + 稳定行号 __i + 图层标记 __layer，**不带任何属性**。
+  // 属性极重的大图层（dbf 动辄上百 MB）若整层下发，下载+JSON.parse+maplibre 建源会卡数秒甚至卡死；
+  // 地图画几何不需要属性——点开属性/点击浮窗按 __i 走 /webgis/layer-row 按行取。
+  const id = url.searchParams.get('id') ?? ''
+  const layer = state.layers.find((l) => l.id === id)
+  if (!layer) return void notFound(res, 'unknown gis layer')
+  const feats = (layer.geojson?.features ?? []) as Array<{ geometry: unknown }>
+  const out = {
+    type: 'FeatureCollection',
+    features: feats.map((f, i) => ({
+      type: 'Feature',
+      geometry: f.geometry,
+      properties: { [LAYER_RENDER_ROW_KEY]: i, [LAYER_RENDER_ID_KEY]: id },
+    })),
+  }
+  json(res, out)
+}
+
+export const handleLayerRow: RouteHandler = (_req, res, url, _pathname, _sessionId, state) => {
+  // 按行号取整行属性（与 arrow-rid 同思路，面向 maplibre 渲染轻量图层）。row = layer.geojson.features 下标。
+  const id = url.searchParams.get('id') ?? ''
+  const rowRaw = Number(url.searchParams.get('row'))
+  const layer = state.layers.find((l) => l.id === id)
+  if (!layer) return void notFound(res, 'unknown gis layer')
+  const feats = (layer.geojson?.features ?? []) as Array<{ properties?: Record<string, unknown> }>
+  if (!Number.isInteger(rowRaw) || rowRaw < 0 || rowRaw >= feats.length) {
+    return void jsonError(res, 400, `行号非法（0 ≤ row < ${feats.length}）`)
+  }
+  json(res, { ok: true, id, name: layer.name, attrs: feats[rowRaw]?.properties ?? {} })
+}
+
 export const handleArrow: RouteHandler = (req, res, url, _pathname, sessionId, state) => {
   // 大文件点图层 → GeoArrow IPC 二进制（deck.gl 原始点渲染的传输路径；只有带 duckTable 的图层有）。
   // 点图层：engine 拉全表 → 直接拼 interleaved Point 表（免 spatial）；几何图层：ST_AsWKB → objex-utils。

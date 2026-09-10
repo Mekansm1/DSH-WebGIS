@@ -79,7 +79,13 @@ export const handleImport: RouteHandler = (req, res, _url, _pathname, _sessionId
         geojson: big?.geojson ?? geojson,
         source: 'import',
         ...(big
-          ? { duckTable: big.duckTable, duckGeom: big.duckGeom, totalCount: big.totalCount, families: big.families }
+          ? {
+              duckTable: big.duckTable,
+              duckGeom: big.duckGeom,
+              totalCount: big.totalCount,
+              families: big.families,
+              fullBbox: big.fullBbox,
+            }
           : {}),
       })
       state.layers = [...state.layers, layer]

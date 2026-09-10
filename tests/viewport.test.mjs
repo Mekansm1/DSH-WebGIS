@@ -140,3 +140,14 @@ test('shouldViewportCull：有层 bbox 看面积比；无层 bbox 看 zoom', () 
   assert.equal(shouldViewportCull(layer, null, 15), true)
   assert.equal(shouldViewportCull(layer, null, 16), true)
 })
+
+test('P0-1 回归：层 bbox 必须用全量范围——抽样 bbox 会让数据存在但抽样未覆盖区走全档位而非视口裁剪', () => {
+  // 真实数据双簇：美国+中国。用户看「中国+东南亚」整片（视野远小于真实范围，应走视口裁剪取真实行）。
+  const full = { west: -130, south: -10, east: 135, north: 60 }   // 全量真实 bbox
+  const sampleUS = { west: -130, south: 20, east: -70, north: 60 } // 抽样恰只落在美国簇（错误 bbox）
+  const view = { west: 70, south: 5, east: 135, north: 55 }        // 用户在东亚
+  // 全量 bbox → view 远小于层 → 值得视口裁剪
+  assert.equal(shouldViewportCull(view, full, 4), true)
+  // 被抽样 bbox 误导 → view 相对「美国窗」不再足够小 → 退回旧全档位（整表随机分档，稀疏簇被稀释、看不到真实行）
+  assert.equal(shouldViewportCull(view, sampleUS, 4), false)
+})

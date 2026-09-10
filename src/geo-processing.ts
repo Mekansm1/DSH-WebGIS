@@ -187,6 +187,10 @@ export function makeResultLayer(opts: {
   materialized?: boolean
   /** duck 表全量几何族（point/line/polygon）。多族时禁 Arrow——Arrow 只能编单族，会静默丢族。 */
   families?: string[]
+  /** 全量数据集真实 bbox（[w,s,e,n]，duck 大图层由灌表后全表聚合算得）。
+   *  缺省回退 geojson（抽样子集）bbox。duck 大图层的 geojson 只是显示抽样，
+   *  其 bbox 必须代表完整数据，viewport 裁剪/工具消息/导出才不至于被抽样误导。 */
+  fullBbox?: BBox | null
 }): GisLayer {
   const geojson = cleanFeatureCollection(normalizeFC(opts.geojson))
   // 渲染路由：判断依据 = 真实行数（duckTable 图层传 totalCount=内存表行数，geojson 只是抽样），不能只看 featureCount。
@@ -219,7 +223,8 @@ export function makeResultLayer(opts: {
     name: opts.name,
     geojson,
     featureCount: geojson.features.length,
-    bbox: bboxOf(geojson),
+    // 有全量 bbox（duck 大图层）用全量；否则用 geojson bbox（物化图层 geojson=全量，两者一致）。
+    bbox: opts.fullBbox ?? bboxOf(geojson),
     visible: true,
     color: opts.color ?? RESULT_COLORS[0] ?? '#3b82f6',
     rev: opts.rev ?? 0,

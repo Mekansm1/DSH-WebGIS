@@ -57,7 +57,7 @@ import { route } from './route-shared.js'
 import { handlePick } from './routes-pick.js'
 import {
   handleArrow, handleArrowAttr, handleArrowRid, handleDataset, handleGisResult,
-  handlePluginConfig, handleState, handleStatus,
+  handleLayerAttrs, handleLayerRender, handleLayerRow, handlePluginConfig, handleState, handleStatus,
 } from './routes-state.js'
 import { handleExport, handleImport, handleLayerAction } from './routes-layers.js'
 import { handleAttachment, handleExportImage } from './routes-export.js'
@@ -227,7 +227,7 @@ export function apply(ctx: Context, config: Config): void {
       source: 'dataset',
       // 同 id 重播种（默认数据集刷新）也要 bump，否则客户端 dataChanged 判定不到内容变化。
       rev: oldDs ? oldDs.rev + 1 : 0,
-      ...(big ? { duckTable: big.duckTable, duckGeom: big.duckGeom, totalCount: big.totalCount } : {}),
+      ...(big ? { duckTable: big.duckTable, duckGeom: big.duckGeom, totalCount: big.totalCount, fullBbox: big.fullBbox } : {}),
     })
     st.layers = [layer, ...st.layers.filter((l) => l.id !== 'dataset')]
   }
@@ -385,6 +385,9 @@ export function apply(ctx: Context, config: Config): void {
     route('POST', '/webgis/plugin-config', handlePluginConfig),
     route(null, '/webgis/dataset', handleDataset),
     route(null, '/webgis/gis-result', handleGisResult),
+    route(null, '/webgis/layer-attrs', handleLayerAttrs),
+    route(null, '/webgis/layer-render', handleLayerRender),
+    route(null, '/webgis/layer-row', handleLayerRow),
     route(null, '/webgis/arrow', handleArrow),
     route(null, '/webgis/arrow-attr', handleArrowAttr),
     route(null, '/webgis/arrow-rid', handleArrowRid),
@@ -643,6 +646,7 @@ export function apply(ctx: Context, config: Config): void {
               duckCoords: csv.duckCoords,
               duckGeom: csv.duckGeom,
               families: csv.families,
+              fullBbox: csv.fullBbox,
             }
           }
         } else if (isLocalVector) {
@@ -660,6 +664,7 @@ export function apply(ctx: Context, config: Config): void {
                 geojson: vec.geojson,
                 ...(vec.duckGeom ? { duckGeom: vec.duckGeom } : {}),
                 families: vec.families,
+                fullBbox: vec.fullBbox,
               }
             }
           } catch (err) {
@@ -695,6 +700,7 @@ export function apply(ctx: Context, config: Config): void {
                 totalCount: big.totalCount,
                 ...(big.duckGeom ? { duckGeom: big.duckGeom } : {}),
                 ...(big.duckCoords ? { duckCoords: big.duckCoords } : {}),
+                ...(big.fullBbox ? { fullBbox: big.fullBbox } : {}),
                 ...(big.families && big.families.length > 1 ? { families: big.families } : {}),
               }
             : {}),
