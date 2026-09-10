@@ -93,3 +93,24 @@ test('parseShapefileBuffer: toShpZip 产物 zip → 要素坐标一致', async (
   assert.equal(gj.features.length, 1)
   assert.deepEqual(gj.features[0].geometry.coordinates, [116.4, 39.9])
 })
+
+// 回归：Windows 工具（PowerShell Out-File / Excel 导出）写的 UTF-8 文件带 BOM，
+// JSON.parse 会抛 "Unexpected token" 且报错看不出是 BOM —— 实测模型因此重写了一遍文件。
+test('loadDataset: 带 BOM 的 GeoJSON 能正常解析（回归）', async () => {
+  const dir = tmpDir()
+  const geoPath = join(dir, 'poi.geojson')
+  const fc = featureCollection([point([116.39, 39.9], { name: 'A' }), point([121.47, 31.23], { name: 'B' })])
+  writeFileSync(geoPath, '﻿' + JSON.stringify(fc), 'utf8')
+  const ds = await loadDataset(geoPath)
+  assert.equal(ds.featureCount, 2)
+  assert.equal(ds.geojson.features[0].properties.name, 'A')
+  assert.deepEqual(ds.geojson.features[0].geometry.coordinates, [116.39, 39.9])
+})
+
+test('stripBom: 只去掉开头 BOM，中间不受影响；无 BOM / 空串原样返回', async () => {
+  const { stripBom } = await import('../lib/text-utils.js')
+  assert.equal(stripBom('﻿{"a":1}'), '{"a":1}')
+  assert.equal(stripBom('{"a":﻿1}'), '{"a":﻿1}')
+  assert.equal(stripBom('{"a":1}'), '{"a":1}')
+  assert.equal(stripBom(''), '')
+})

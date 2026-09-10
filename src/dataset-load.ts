@@ -3,6 +3,7 @@
  * 拆分自 src/index.ts：纯模块级 helper，供 apply()（默认数据集/load_dataset 工具）、/webgis/import 路由与单测复用。
  */
 import { readFile } from 'node:fs/promises'
+import { stripBom } from './text-utils.js'
 import { fileURLToPath } from 'node:url'
 import type { DatasetInfo, GeoJson } from './session-state.js'
 import { getShapefile } from 'shpjs'
@@ -125,13 +126,13 @@ export function resolveSourceLocal(source: string): string {
     : fileURLToPath(new URL(`../${source}`, import.meta.url))
 }
 
-/** 读取数据集文本（http(s) URL 或本地路径，32MB 上限；http 走 SSRF 防护抓取）。 */
+/** 读取数据集文本（http(s) URL 或本地路径，32MB 上限；http 走 SSRF 防护抓取）。读入即去 BOM。 */
 async function readDatasetText(source: string): Promise<string> {
   if (/^https?:\/\//i.test(source)) {
     const { buffer } = await fetchData(source, { maxBytes: 32 * 1024 * 1024 })
-    return buffer.toString('utf8')
+    return stripBom(buffer.toString('utf8'))
   }
-  return await readFile(resolveSourceLocal(source), 'utf8')
+  return stripBom(await readFile(resolveSourceLocal(source), 'utf8'))
 }
 
 /**

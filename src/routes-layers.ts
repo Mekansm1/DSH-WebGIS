@@ -7,6 +7,7 @@ import {
   MAX_LAYER_ACTION_BODY, notFound, readBody,
 } from './http-utils.js'
 import { toCsv, toGeoJSON, toShpZip } from './geo-export.js'
+import { stripBom } from './text-utils.js'
 import { loadCsvText, parseShapefileBuffer } from './dataset-load.js'
 import { makeResultLayer, normalizeFC } from './geo-processing.js'
 import { ingestBigGeojson, type IngestBigResult } from './duckdb-tools.js'
@@ -67,7 +68,7 @@ export const handleImport: RouteHandler = (req, res, _url, _pathname, _sessionId
       } else if (ext === 'csv') {
         geojson = loadCsvText(buf.toString('utf8'))
       } else {
-        geojson = normalizeFC(JSON.parse(buf.toString('utf8')) as never) as unknown as GeoJson
+        geojson = normalizeFC(JSON.parse(stripBom(buf.toString('utf8'))) as never) as unknown as GeoJson
       }
       const baseName = cleanName.replace(/\.(zip|shp|csv|geojson|json)$/i, '') || 'import'
       // >10 万（任何格式：zip/shp/csv/geojson）统一灌 DuckDB → arrow + zoom 分级；失败回退纯 geojson。
