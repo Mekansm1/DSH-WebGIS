@@ -60,7 +60,7 @@ test('registerGeoTools：经 inject 注册全局工具纪律系统提示段（#6
   assert.ok(defs.length >= 35)
 })
 
-test('全部 36 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 3 统计 + 3 展示方式/改色 + 3 属性编辑）', () => {
+test('全部 38 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统计 + 3 展示方式/改色 + 3 属性编辑）', () => {
   const { defs } = setup()
   const names = defs.map((d) => d.name).sort()
   const expected = [
@@ -68,7 +68,7 @@ test('全部 36 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 3 统�
     'webgis_buffer', 'webgis_centroids', 'webgis_clear_layers', 'webgis_clip',
     'webgis_convex_hull', 'webgis_difference', 'webgis_dissolve', 'webgis_explode',
     'webgis_feature_summary', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
-    'webgis_list_layers', 'webgis_moran_i', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
+    'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
     'webgis_reproject', 'webgis_select_by_location', 'webgis_select_by_value',
     'webgis_set_attribute', 'webgis_set_heatmap_mode', 'webgis_set_layer_color', 'webgis_set_layer_style',
     'webgis_set_layer_visibility',
@@ -672,4 +672,113 @@ test('抽样守卫：逐要素空间分析拒做未物化图层；已物化正�
   const kde = await run('webgis_kernel_density', { layer: 'csv_1', mode: 'plane' })
   assert.equal(kde.ok, true)
   assert.match(kde.message, /抽样/)
+})
+
+// ---- 莫兰：体检 → 确认 → 计算 的工作流 ----
+
+test('webgis_moran_inspect：不传 layer 扫描全部图层，推荐数值字段、排除 ID/常量/文本，并给出默认参数', async () => {
+  const messy = makeResultLayer({
+    id: 'ds_messy', name: '混装',
+    geojson: featureCollection([
+      square(0, 0, 1, 1, { name: '甲', OBJECTID: 1, code: 'A01', pop: 10, ratio: '1.5' }),
+      square(1, 0, 2, 1, { name: '乙', OBJECTID: 2, code: 'A02', pop: 20, ratio: '2.5' }),
+      square(0, 1, 1, 2, { name: '丙', OBJECTID: 3, code: 'A03', pop: 30, ratio: '3.5' }),
+      square(1, 1, 2, 2, { name: '丁', OBJECTID: 4, code: 'A04', pop: 40, ratio: '4.5' }),
+    ]),
+    source: 'dataset',
+  })
+  const { run } = setup([messy])
+  const res = await run('webgis_moran_inspect', {})
+  assert.equal(res.ok, true)
+  assert.equal(res.stat, 'moran_inspect')
+  const layer = res.value.layers.find((l) => l.layerId === 'ds_messy')
+  assert.ok(layer, '应报告该图层')
+  assert.equal(layer.feasible, true)
+  const rec = layer.recommendedFields.map((f) => f.field).sort()
+  assert.deepEqual(rec, ['pop', 'ratio'], '数值列（含数值字符串）应推荐')
+  const excl = Object.fromEntries(layer.excludedFields.map((f) => [f.field, f.excluded]))
+  assert.match(excl.OBJECTID, /标识/)
+  assert.match(excl.code, /标识/)
+  assert.match(excl.name, /非数值/)
+  assert.equal(layer.defaultWeight, 'queen')
+  assert.match(res.message, /推荐字段/)
+  assert.match(res.message, /等待确认/)
+})
+
+test('webgis_moran_inspect：无可用数值字段 / 要素过少 → 明确说明不可分析及原因', async () => {
+  const noNum = makeResultLayer({
+    id: 'ds_text', name: '纯文本',
+    geojson: featureCollection([
+      square(0, 0, 1, 1, { a: 'x' }), square(1, 0, 2, 1, { a: 'y' }),
+    ]),
+    source: 'dataset',
+  })
+  const { run } = setup([noNum])
+  const res = await run('webgis_moran_inspect', {})
+  assert.equal(res.ok, true)
+  const layer = res.value.layers[0]
+  assert.equal(layer.feasible, false)
+  assert.ok(layer.reasons.some((r) => /要素过少/.test(r)))
+  assert.ok(layer.reasons.some((r) => /没有可用的数值字段/.test(r)))
+  assert.equal(res.value.anyFeasible, false)
+  assert.match(res.message, /无法支持莫兰指数分析/)
+})
+
+test('webgis_moran_inspect：抽样图层给出警示（须先筛成全量）', async () => {
+  const sampled = makeResultLayer({
+    id: 'ds_big', name: '大文件抽样',
+    geojson: featureCollection([
+      square(0, 0, 1, 1, { pop: 1 }), square(1, 0, 2, 1, { pop: 2 }),
+      square(0, 1, 1, 2, { pop: 3 }), square(1, 1, 2, 2, { pop: 4 }),
+    ]),
+    source: 'dataset',
+    duckTable: 'duckdb_x', duckGeom: { column: 'geom', format: 'geometry', sourceCrs: null },
+    totalCount: 200000,
+  })
+  const { run } = setup([sampled])
+  const res = await run('webgis_moran_inspect', {})
+  const layer = res.value.layers[0]
+  assert.equal(layer.materialized, false)
+  assert.match(layer.warning, /抽样/)
+  assert.match(res.message, /先用 webgis_filter_layer/)
+})
+
+test('webgis_local_moran：生成带 lisa_class 的新图层并汇总四类', async () => {
+  const vals = [90, 95, 100, 1, 1, 1, 1, 1, 1, 1]
+  const grid = makeResultLayer({
+    id: 'ds_grid', name: '格网',
+    geojson: featureCollection(vals.map((v, i) => square(i, 0, i + 1, 1, { v }))),
+    source: 'dataset',
+  })
+  const { run, state } = setup([grid])
+  const res = await run('webgis_local_moran', { layer: 'ds_grid', field: 'v', permutations: 999, seed: 11 })
+  assert.equal(res.ok, true)
+  assert.ok(res.layerId, '应产出新图层')
+  const out = state.layers.find((l) => l.id === res.layerId)
+  assert.ok(out)
+  assert.equal(out.featureCount, 10)
+  for (const f of out.geojson.features) {
+    assert.ok(['HH', 'LL', 'HL', 'LH', 'nonsig'].includes(f.properties.lisa_class))
+    assert.ok(Number.isFinite(f.properties.lisa_I))
+  }
+  assert.match(res.message, /HH \d+/)
+  assert.match(res.message, /不显著/)
+})
+
+test('webgis_moran_i：weight=distance 需阈值；点图层默认 knn 可算', async () => {
+  const pts = makeResultLayer({
+    id: 'ds_pts', name: '点',
+    geojson: featureCollection([
+      point([0, 0], { v: 10 }), point([0.01, 0], { v: 11 }), point([0.02, 0], { v: 9 }),
+      point([1, 0], { v: 1 }), point([1.01, 0], { v: 2 }), point([1.02, 0], { v: 1 }),
+    ]),
+    source: 'dataset',
+  })
+  const { run } = setup([pts])
+  const noThr = await run('webgis_moran_i', { layer: 'ds_pts', field: 'v', weight: 'distance' })
+  assert.equal(noThr.ok, false)
+  assert.match(noThr.message, /distanceMeters/)
+  const knnRes = await run('webgis_moran_i', { layer: 'ds_pts', field: 'v' })
+  assert.equal(knnRes.ok, true)
+  assert.equal(knnRes.value.weight, 'knn')
 })
