@@ -45,8 +45,10 @@ export interface PickScreenshot {
   ref: ImageAttachmentRef
   /** 截图像素 / 地图模块 css 像素 比例（截图像素 = css 像素 × scale）。 */
   scale: number
-  /** 图钉在截图图像里的像素位置（原点左上角，x 向右 y 向下）。 */
+  /** 关注位置在截图图像里的像素位置（原点左上角，x 向右 y 向下）。捕获时即画面中心。 */
   pin: { x: number; y: number }
+  /** 图上是否真的画了红点：仅用户手动点击底图时为 true；捕获当前视野时图为"干净"的。 */
+  pinned?: boolean
   /** 截图那一刻的地图视口，用于像素↔经纬度换算（不依赖当前 live map）。 */
   viewport: GeoViewport
 }

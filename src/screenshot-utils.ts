@@ -15,6 +15,8 @@ export interface ScreenshotMeta {
   height: number
   scale: number
   pin: { x: number; y: number }
+  /** 图上是否画了红点（只有用户手动点击底图才画）。决定文案里提不提「红点」。 */
+  pinned: boolean
   /** 截图四角换算出的地理覆盖范围（文本模型不真看图也能据此推断区域）。 */
   extent: { west: number; south: number; east: number; north: number }
   ref: ImageAttachmentRef
@@ -131,6 +133,7 @@ export function screenshotMeta(shot: PickScreenshot): ScreenshotMeta {
     height: h,
     scale: shot.scale,
     pin: shot.pin,
+    pinned: shot.pinned === true,
     extent: {
       west: Math.min(...lngs),
       east: Math.max(...lngs),
@@ -162,7 +165,7 @@ export async function parseScreenshot(ctx: Context, raw: unknown): Promise<PickS
     ? { x: toFiniteNum(p.x, 0), y: toFiniteNum(p.y, 0) }
     : { x: 0, y: 0 }
   const ref = await ctx.attachments.saveImage({ data: decoded.bytes, mediaType: decoded.mediaType, name: 'webgis-map' })
-  return { ref, scale, pin, viewport }
+  return { ref, scale, pin, viewport, pinned: s.pinned === true }
 }
 
 /** 解析并校验截图视口（中心为 [lng, lat] 数组），缺失/非法返回 null。 */

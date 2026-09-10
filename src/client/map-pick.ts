@@ -1,5 +1,5 @@
 /**
- * 地图点击/捕获链路：要素拾取、属性浮窗截图（红点=关注位置）、pick 上报、按范围缩放。
+ * 地图点击/捕获链路：要素拾取、属性浮窗截图（红点=用户点击位置，仅点击时才有）、pick 上报、按范围缩放。
  * 自 MapView.tsx 拆分。
  */
 import type { Point, Map as MapLibreMap } from 'maplibre-gl'
@@ -25,6 +25,9 @@ export interface ScreenshotPayload {
   dataUrl: string
   scale: number
   pin: { x: number; y: number }
+  /** 图上是否画了红点。**只有用户手动点击底图才画**；捕获当前视野时没有关注点，不画。
+   *  host 据此决定文案里是否提「红点」，避免模型把画面中心当成用户指定的位置。 */
+  pinned: boolean
   viewport: {
     width: number
     height: number
@@ -71,11 +74,15 @@ export function collectCoords(geo: unknown, out: number[][]): void {
 
 /**
  * 截取地图模块（仅 WebGL canvas，不含任何 DOM）：把 canvas 画到 2D canvas 上、
- * 在点击位置合成红色图钉、限制最大边长后输出 PNG dataURL。同时记录截图那一刻的
+ * 在关注位置合成红色图钉、限制最大边长后输出 PNG dataURL。同时记录截图那一刻的
  * 视口与缩放，供 host 做「截图像素 ↔ 经纬度」换算（不依赖之后的 live map）。
  * 失败（无 canvas / 无 2d context）返回 null，调用方降级为仅上报坐标。
+ *
+ * @param withPin 是否在 (lng, lat) 画红点。**只有用户手动点击底图才传 true** ——
+ *   捕获当前视野时没有"用户指定的位置"，画上去的红点只会让模型把画面中心当成关注点，
+ *   还会引它去比对两个不同来源的红点（实测踩过）。
  */
-export function captureMapScreenshot(map: MapLibreMap, lng: number, lat: number): ScreenshotPayload | null {
+export function captureMapScreenshot(map: MapLibreMap, lng: number, lat: number, withPin = true): ScreenshotPayload | null {
   const canvas = map.getCanvas()
   const bw = canvas.width
   const bh = canvas.height
@@ -95,18 +102,19 @@ export function captureMapScreenshot(map: MapLibreMap, lng: number, lat: number)
   if (!ctx) return null
   ctx.drawImage(canvas, 0, 0, w, h)
 
-  // 图钉像素位置：map.project 给 css 像素 → 换算到输出图像像素（scale = 图像px / css px）
+  // 关注位置的像素坐标：map.project 给 css 像素 → 换算到输出图像像素（scale = 图像px / css px）
   const pinCss = map.project([lng, lat])
   const scale = w / cssWidth
   const pinX = pinCss.x * scale
   const pinY = pinCss.y * scale
-  drawPin(ctx, pinX, pinY, Math.max(5, 10 * scale))
+  if (withPin) drawPin(ctx, pinX, pinY, Math.max(5, 10 * scale))
 
   const center = map.getCenter()
   return {
     dataUrl: out.toDataURL('image/png'),
     scale,
     pin: { x: pinX, y: pinY },
+    pinned: withPin,
     viewport: {
       width: cssWidth,
       height: cssHeight,
@@ -163,7 +171,10 @@ export function clearPick(sessionId?: string): void {
   }).catch(() => {})
 }
 
-/** 记录点击/捕获 pick 并上报 host：截地图模块截图（红点=关注位置）→ POST /webgis/pick。返回截图（可能 null）。 */
+/**
+ * 记录点击/捕获 pick 并上报 host：截地图模块截图 → POST /webgis/pick。返回截图（可能 null）。
+ * @param withPin 是否在图上画红点（见 captureMapScreenshot）；捕获当前视野传 false。
+ */
 export function recordPick(
   map: MapLibreMap,
   lng: number,
@@ -171,8 +182,9 @@ export function recordPick(
   features: FeaturePayload[],
   captureSeq?: number,
   sessionId?: string,
+  withPin = true,
 ): ScreenshotPayload | null {
-  const shot = captureMapScreenshot(map, lng, lat)
+  const shot = captureMapScreenshot(map, lng, lat, withPin)
   const payload: Record<string, unknown> = { lng, lat, features }
   if (captureSeq !== undefined) payload.captureSeq = captureSeq
   if (shot) payload.screenshot = shot

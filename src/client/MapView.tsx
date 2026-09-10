@@ -708,8 +708,11 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
           map.flyTo({ center: [st.navigate.lng, st.navigate.lat], zoom, duration: 1200 })
         }
 
-        // host 请求「捕获当前视图」（用户没点击、直接问"这里是什么地方"）：截当前地图中心，
-        // 落中心图钉 + 提取中心要素 + 关联 captureSeq 上报，供等待中的 webgis_get_pick 消费。
+        // host 请求「捕获当前视图」（用户没点击、直接问"这里是什么地方/图上有什么"）：截当前地图，
+        // 提取中心要素 + 关联 captureSeq 上报，供等待中的 webgis_get_pick 消费。
+        // ⚠️ 这里**不落图钉、不画红点**：本次没有"用户指定的位置"，红点只会让模型把画面中心
+        // 当成关注点（实测它还会去比对两个来源不同的红点、量形状和质心，纯属干扰）。
+        // 红点只属于一种情形：用户手动点击底图。
         if (st.capture && st.capture.seq !== lastCaptureSeq.current) {
           lastCaptureSeq.current = st.capture.seq
           // 若上一条 navigate 的飞行还没落定，先等地图 idle，避免截到飞行中间帧（中心坐标偏）。
@@ -723,13 +726,12 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
           const lng = center.lng
           const lat = center.lat
           closePopup()
-          if (markerRef.current) {
-            markerRef.current.setLngLat([lng, lat])
-          } else {
-            markerRef.current = new maplibregl.Marker({ color: '#ef4444' }).setLngLat([lng, lat]).addTo(map)
-          }
+          // 清掉上一次点击留下的图钉：本次捕获没有关注点，留着会让屏幕上的红点与
+          // 上报的坐标（画面中心）对不上。
+          markerRef.current?.remove()
+          markerRef.current = null
           const features = queryFeatures(map, map.project(center))
-          recordPick(map, lng, lat, features, st.capture.seq, sessionRef.current)
+          recordPick(map, lng, lat, features, st.capture.seq, sessionRef.current, false)
         }
       } catch {
         // 网络/解析错误忽略，下一轮重试

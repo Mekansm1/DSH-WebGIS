@@ -782,9 +782,10 @@ export function apply(ctx: Context, config: Config): void {
       '获取地图上当前被关注的位置/要素。两种来源：'
       + '1) 用户最近一次点击地图：点击命中要素时客户端已即时弹出该要素属性浮窗（不经过本工具），'
       + '本工具返回该次点击经纬度 longitude/latitude、命中要素 features（含其全部属性）、'
-      + '当前视图范围 bbox（[west,south,east,north]）与截图（图中红点为点击位置）；'
+      + '当前视图范围 bbox（[west,south,east,north]）与截图（**图中红点即用户点击位置**）；'
       + '点击空白处则标记该点位置，features 为空。'
-      + '2) 若尚无点击记录，则捕获当前地图视图（图框中心），返回中心坐标、中心命中要素、bbox 与截图。'
+      + '2) 若尚无点击记录，则捕获当前地图视图（画面中心），返回中心坐标、中心命中要素、bbox 与截图；'
+      + '此时图为"干净"的视野捕获、**图上没有红点**（没有用户指定的关注点，别去找标记）。'
       + '两种来源都会附上当前画面上的可见图层清单 layers（名称/几何类型/要素数/颜色/展示方式/是否在视野内）——'
       + '截图只含地图画布、不含图层列表，所以要回答「图上有什么、图斑怎么分布、某块颜色是什么图层」必须结合这份清单。'
       + '用户点击要素后问「刚才点的是什么/这个要素的属性」，或问「当前地图上有什么/帮我看看这张图/图上都有哪些图层」'
@@ -837,7 +838,12 @@ export function apply(ctx: Context, config: Config): void {
           : '，无命中要素'
         const ext = shot.extent
         const range = `截图覆盖范围：经度 ${ext.west.toFixed(4)}~${ext.east.toFixed(4)}，纬度 ${ext.south.toFixed(4)}~${ext.north.toFixed(4)}。`
-        const head = `地图截图已生成（${shot.width}×${shot.height}px）。红点即关注位置（点击处或图框中心），位于截图像素 ${pin}，对应 ${ll}。${range}${feat}。`
+        // 红点只在用户手动点击底图时才有：捕获当前视野时图是干净的，不能提「红点」，
+        // 否则模型会把画面中心当成用户指定的位置（实测会被那个不存在的点带偏）。
+        const head = shot.pinned
+          ? `地图截图已生成（${shot.width}×${shot.height}px）。红点即用户点击的关注位置，位于截图像素 ${pin}，对应 ${ll}。${range}${feat}。`
+          : `地图截图已生成（${shot.width}×${shot.height}px）。图为当前视野捕获、**图上没有任何标记**：`
+            + `画面中心位于截图像素 ${pin}，对应 ${ll}。${range}${feat}。`
         const items = v.layers ?? []
         const layersText = items.length > 0
           ? `当前画面上的可见图层（按「视野内、要素多」排序）：\n`

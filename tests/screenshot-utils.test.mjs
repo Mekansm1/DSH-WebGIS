@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { digestLine, layerDigest } from '../lib/screenshot-utils.js'
+import { digestLine, layerDigest, screenshotMeta } from '../lib/screenshot-utils.js'
 
 /** 最小图层桩（只喂 layerDigest 用到的字段）。 */
 function layer(over = {}) {
@@ -85,4 +85,27 @@ test('digestLine: 带上名称/id/几何/要素数/颜色/展示方式，视野�
 
   const off = layerDigest([layer({ bbox: [100, 20, 101, 21] })], VIEW)
   assert.match(digestLine(off.items[0]), /不在当前视野内/)
+})
+
+// ---- 红点只在「用户手动点击」时才有 ----
+
+const SHOT = {
+  ref: { attachmentId: 'a', mediaType: 'image/png', bytes: 1, width: 1024, height: 1024, name: 'webgis-map' },
+  scale: 1,
+  pin: { x: 512, y: 512 },
+  viewport: { width: 1024, height: 1024, zoom: 12, bearing: 0, pitch: 0, centerLng: 116.4, centerLat: 39.9 },
+}
+
+test('screenshotMeta: 透传 pinned；捕获视图（缺省）视为图上无红点', () => {
+  assert.equal(screenshotMeta({ ...SHOT, pinned: true }).pinned, true)
+  // 捕获路径不传 pinned → 必须是 false，否则文案会去描述一个不存在的红点
+  assert.equal(screenshotMeta({ ...SHOT }).pinned, false)
+})
+
+test('screenshotMeta: 四角反投影出的 extent 包住画面中心（换算自洽）', () => {
+  const meta = screenshotMeta(SHOT)
+  assert.ok(meta.extent.west < 116.4 && 116.4 < meta.extent.east)
+  assert.ok(meta.extent.south < 39.9 && 39.9 < meta.extent.north)
+  assert.equal(meta.width, 1024)
+  assert.equal(meta.height, 1024)
 })
