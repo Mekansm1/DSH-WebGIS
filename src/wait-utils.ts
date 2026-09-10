@@ -53,26 +53,41 @@ export async function awaitCurrentViewCapture(
 /** 出图结果等待上限（出图含用户弹窗确认/合成，放宽到 60s）。 */
 export const EXPORT_WAIT_MS = 60000
 
+export type ExportWaitResult =
+  | { ok: true; image: { id: number; ref: ImageAttachmentRef; width: number; height: number; title?: string } }
+  | { ok: false; message: string }
+
 /**
  * 等待客户端完成一次出图并回传（配合 webgis_export_map 使用）：
  * 工具先把 exportRequest 置为 { seq, params }（客户端弹窗预填），再调本函数等
- * 客户端 POST /webgis/export-image 带回同 seq。超时清 exportRequest 并返回 null。
+ * 客户端 POST /webgis/export-image 带回同 seq。
+ *
+ * 三个出口：拿到图 / 用户关掉弹窗（state.exportError，立即返回）/ 超时。
+ * 中间那个出口是补的：原先只认「拿到图」，用户点了下载并关闭弹窗时 host 只能干等到超时，
+ * 表现为工具卡住，模型还会再劝用户点一次按钮。
  */
 /** 供 host 侧单测直接构造测试状态使用（仅此用途；exported for tests）。 */
 export async function awaitExportCompletion(
   state: WebgisState,
   seq: number,
   waitMs: number = EXPORT_WAIT_MS,
-): Promise<{ id: number; ref: ImageAttachmentRef; width: number; height: number; title?: string } | null> {
+): Promise<ExportWaitResult> {
   const deadline = Date.now() + waitMs
   while (Date.now() < deadline) {
     await delay(POLL_STEP_MS)
     const img = state.exportImage
     if (img && img.id === seq) {
       state.exportRequest = null
-      return img
+      state.exportError = null
+      return { ok: true, image: img }
+    }
+    if (state.exportError) {
+      const message = state.exportError
+      state.exportRequest = null
+      state.exportError = null
+      return { ok: false, message }
     }
   }
   state.exportRequest = null
-  return null
+  return { ok: false, message: '等待出图超时（用户未在出图弹窗确认）。不要反复重试，先问用户是否要继续出图。' }
 }

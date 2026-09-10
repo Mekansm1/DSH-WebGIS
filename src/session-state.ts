@@ -99,6 +99,8 @@ export interface WebgisState {
   captureError: string | null
   /** host 发起的出图请求（AI 工具 webgis_export_map 设置；客户端见新 seq → 打开出图弹窗并预填）。 */
   exportRequest: { seq: number; params: ExportRequestParams } | null
+  /** 出图等待被打断的原因（用户关掉了出图弹窗）→ 等待者立刻返回，不必干等 60s 超时。 */
+  exportError: string | null
   /** 最近一次出图结果（附件引用；AI 工具 webgis_get_export_map 读取）。 */
   exportImage: ExportImageResult | null
   /**
@@ -114,7 +116,7 @@ const ANON_KEY = 'anon'
 export function emptyWebgisState(): WebgisState {
   return {
     dataset: null, navigate: null, pick: null, capture: null, captureError: null,
-    exportRequest: null, exportImage: null,
+    exportRequest: null, exportImage: null, exportError: null,
     layers: [],
   }
 }

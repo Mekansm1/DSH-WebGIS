@@ -139,7 +139,7 @@ export function apply(ctx: Context, config: Config): void {
   const states = new SessionStateStore(() => {
     const st: WebgisState = {
       dataset: null, navigate: null, pick: null, capture: null, captureError: null,
-      exportRequest: null, exportImage: null,
+      exportRequest: null, exportImage: null, exportError: null,
       layers: [],
     }
     // 已配置默认数据集时，新会话各自带上独立副本（后续加载别的数据不影响其他会话）。
@@ -511,8 +511,9 @@ export function apply(ctx: Context, config: Config): void {
           extent: args.extent === 'all' ? 'all' : 'view',
         },
       }
-      const img = await awaitExportCompletion(st, seq)
-      if (!img) return { ok: false, message: '等待出图超时（请在地图出图弹窗点「导出并给 AI 看」）' }
+      const waited = await awaitExportCompletion(st, seq)
+      if (!waited.ok) return { ok: false, message: waited.message }
+      const img = waited.image
       const supports = await modelSupportsImage(ctx, exec)
       return {
         ok: true,

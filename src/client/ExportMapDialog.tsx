@@ -60,8 +60,8 @@ export function ExportMapDialog(props: {
   layers: ExportLayerSummary[]
   mapRef: { current: MapLibreMap | null }
   t: WebgisT
-  /** 导出并给 AI 看时回调（dataUrl PNG + 尺寸 + 标题）。 */
-  onExportToAi?: (dataUrl: string, width: number, height: number, title: string) => void
+  /** 每次导出（下载或给 AI）都回调一次：上传 host → 解除 webgis_export_map 的等待 + 更新「最近一次出图」。 */
+  onExported?: (dataUrl: string, width: number, height: number, title: string) => void
   /** host 出图请求预填（webgis_export_map）。 */
   prefill?: ExportPrefill | null
 }): JSX.Element | null {
@@ -193,15 +193,14 @@ export function ExportMapDialog(props: {
     try {
       const canvas = await build()
       if (!canvas) return
-      if (toAi) {
-        if (props.onExportToAi) {
-          props.onExportToAi(canvasToDataUrl(canvas), canvas.width, canvas.height, title)
-        } else {
-          downloadCanvas(canvas, exportFilename(title))
-        }
-      } else {
-        downloadCanvas(canvas, exportFilename(title))
-      }
+      const dataUrl = canvasToDataUrl(canvas)
+      // 两条路**都要上报 host**。曾经只有「导出并给 AI 看」上报，于是用户在 AI 等待期间点
+      // 「导出 PNG」（拿到文件就满足了）时，host 收不到任何消息 → 干等到 60s 超时，看起来像卡死。
+      // 上报的另一个收益：任何一次手动导出都会更新「最近一次出图」，webgis_get_export_map 随时能取到。
+      if (props.onExported) props.onExported(dataUrl, canvas.width, canvas.height, title)
+      else if (toAi) downloadCanvas(canvas, exportFilename(title))
+      // 纯下载路径额外给用户落一份文件
+      if (!toAi) downloadCanvas(canvas, exportFilename(title))
     } finally {
       setBusy(false)
     }

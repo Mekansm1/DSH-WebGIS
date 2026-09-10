@@ -14,7 +14,18 @@ export const handleExportImage: RouteHandler = (req, res, _url, _pathname, _sess
   return void (async () => {
     try {
       const raw = await readBody(req, MAX_PICK_BODY)
-      const data = JSON.parse(raw) as { seq?: unknown; title?: unknown; width?: unknown; height?: unknown; dataUrl?: unknown }
+      const data = JSON.parse(raw) as {
+        seq?: unknown; title?: unknown; width?: unknown; height?: unknown; dataUrl?: unknown; cancelSeq?: unknown
+      }
+      // 用户关掉了出图弹窗：解除等待（只在 seq 对得上当前请求时才认，避免误取消后来的请求）。
+      const cancelSeq = Number(data.cancelSeq)
+      if (Number.isInteger(cancelSeq) && cancelSeq > 0) {
+        if (state.exportRequest && state.exportRequest.seq === cancelSeq) {
+          state.exportRequest = null
+          state.exportError = '用户关闭了出图弹窗，本次出图已取消'
+        }
+        return void json(res, { ok: true })
+      }
       const b64 = typeof data.dataUrl === 'string' ? data.dataUrl : ''
       if (!b64) return void jsonError(res, 400, '缺少 dataUrl')
       const decoded = decodeDataUrl(b64)

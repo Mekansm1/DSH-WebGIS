@@ -60,7 +60,7 @@ interface ExportDialogProps {
   mapRef: { current: MapLibreMap | null }
   t: WebgisT
   prefill?: ExportPrefill | null
-  onExportToAi?: (dataUrl: string, width: number, height: number, title: string) => void
+  onExported?: (dataUrl: string, width: number, height: number, title: string) => void
 }
 
 /** 全帧 WebGIS 地图（GIS 模式下填满对话页主区域）。 */
@@ -88,20 +88,23 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     }
     deckRef.current?.clearSelection()
   }
-  /** 出图结果上传 host（「导出并给 AI 看」；带 AI 请求的 seq 回传供等待中的 webgis_export_map 收）。失败静默（本地下载仍可用）。 */
+  /** 出图结果上传 host（下载与「导出并给 AI 看」共用；带 AI 请求的 seq 回传，供等待中的 webgis_export_map 收）。
+   *  成功回传后消费掉 seq：之后关闭弹窗不会再发一个本该无效的「取消」信号。失败静默（本地下载仍可用）。 */
   const postExportImage = async (dataUrl: string, width: number, height: number, title: string): Promise<void> => {
+    const seq = lastExportSeq.current
     try {
       await fetch(sessionUrl(sessionRef.current, '/webgis/export-image'), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          seq: lastExportSeq.current > 0 ? lastExportSeq.current : undefined,
+          seq: seq > 0 ? seq : undefined,
           title: title || undefined,
           width,
           height,
           dataUrl,
         }),
       })
+      if (seq > 0) lastExportSeq.current = 0
     } catch {
       // 网络失败忽略：用户已能本地下载
     }
@@ -149,6 +152,22 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
         if (C) setExportDialogComp(() => C)
       })
       .catch((err: unknown) => console.warn('[webgis] export chunk 加载失败', err))
+  }
+  /**
+   * 关闭出图弹窗。若有 AI 在等这次出图（`webgis_export_map` 的等待），回传一个「用户取消」信号 ——
+   * 否则 host 只能干等到 60s 超时才返回，用户看到的是"工具卡住了"。
+   * 没有等待中的请求时不发（seq 已消费/为 0），host 侧也只认 seq 匹配的取消。
+   */
+  const closeExport = (): void => {
+    setExportOpen(false)
+    const seq = lastExportSeq.current
+    if (seq <= 0) return
+    lastExportSeq.current = 0
+    void fetch(sessionUrl(sessionRef.current, '/webgis/export-image'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cancelSeq: seq }),
+    }).catch(() => { /* 网络失败：host 侧仍会按超时收尾 */ })
   }
   /** 当前底图（左下角切换器）；默认条目（default）url 为空，apply 时用 /webgis/state 的 baseTileUrl 填。 */
   const [baseMap, setBaseMap] = useState<BaseMapDef>(() => BASE_MAPS.find((d) => d.id === 'default') ?? BASE_MAPS[0]!)
@@ -832,12 +851,12 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       {ExportDialogComp && (
         <ExportDialogComp
           open={exportOpen}
-          onClose={() => setExportOpen(false)}
+          onClose={() => closeExport()}
           layers={layers}
           mapRef={mapRef}
           t={t}
           prefill={exportPrefill}
-          onExportToAi={(dataUrl, width, height, title) => void postExportImage(dataUrl, width, height, title)}
+          onExported={(dataUrl, width, height, title) => void postExportImage(dataUrl, width, height, title)}
         />
       )}
     </div>
