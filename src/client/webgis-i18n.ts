@@ -22,6 +22,7 @@ const zh = {
   // ---- 通用 / 格式化 ----
   'meta.lang': 'zh',
   // ---- GIS surface：地图懒加载占位 / 模式切换按钮 ----
+  'layout.resizeHint': '拖动调整对话栏宽度（地图随之变宽/变窄）',
   'gis.mapLoading': '加载地图中…',
   'gis.mapLoadFailed': '地图加载失败（点击重进 GIS 模式重试）',
   'mode.toTraditional': '切回传统模式',
@@ -63,6 +64,10 @@ const zh = {
   'attr.title': '{name} · {total} 要素',
   'attr.close': '关闭',
   'attr.truncated': '仅显示前 {shown} 行 / 共 {total} 行',
+  'attr.pager': '第 {cur} / {pages} 页',
+  'attr.prev': '上一页',
+  'attr.next': '下一页',
+  'attr.loading': '加载中…',
   'attr.empty': '该图层无属性字段',
   // ---- gis chunk：点击属性浮窗 ----
   'popup.empty': '（该要素无属性字段）',
@@ -201,6 +206,7 @@ export type WebgisT = TranslateNS<'webgis'>
 
 const en: Record<WebgisKey, string> = {
   'meta.lang': 'en',
+  'layout.resizeHint': 'Drag to resize the chat panel (the map resizes with it)',
   'gis.mapLoading': 'Loading map…',
   'gis.mapLoadFailed': 'Failed to load map (re-enter GIS mode to retry)',
   'mode.toTraditional': 'Back to classic mode',
@@ -239,6 +245,10 @@ const en: Record<WebgisKey, string> = {
   'attr.title': '{name} · {total} features',
   'attr.close': 'Close',
   'attr.truncated': 'Showing the first {shown} of {total} rows',
+  'attr.pager': 'Page {cur} / {pages}',
+  'attr.prev': 'Prev',
+  'attr.next': 'Next',
+  'attr.loading': 'Loading…',
   'attr.empty': 'This layer has no attribute fields',
   'popup.empty': '(No attribute fields for this feature)',
   'popup.viewAll': 'View all {n} attributes',

@@ -35,6 +35,24 @@ interface LayerSummary {
   materialized?: boolean
 }
 
+/** 立即翻转某图层在地图上的显隐（乐观生效，不等服务器回显/轮询；幂等，回显后一致）。
+ *  只翻 maplibre 层（含其 source/hex source 与 dataset 的 data source）；deck 特效/raw 层仍走服务器轮询。 */
+function applyMapVisibilityNow(map: MapLibreMap | null, id: string, vis: boolean): void {
+  if (!map) return
+  const want = vis ? 'visible' : 'none'
+  const srcs = new Set([`gis-${id}`, `gis-${id}-hex`])
+  if (id === 'dataset') srcs.add('data')
+  for (const l of map.getStyle().layers as Array<{ id: string; source?: string }>) {
+    if (l.source && srcs.has(l.source)) {
+      try {
+        map.setLayoutProperty(l.id, 'visibility', want)
+      } catch {
+        // 个别层类型无 visibility 属性：忽略
+      }
+    }
+  }
+}
+
 /** 大数显示：zh ≥1 万用「x.x 万」、≥1 亿用「x 亿」，否则原样（与历史逐字一致）；
  *  en 用千分位全数字（GIS 计数需精确，不用 k/M）。 */
 function fmtCount(n: number, t: WebgisT): string {
@@ -130,10 +148,12 @@ export function LayerPanel(props: {
     })
   }, [props.layers])
 
-  /** 显隐切换：先乐观翻转本地覆盖（视觉立即生效），再 POST set-visible（幂等、明确目标值）。 */
+  /** 显隐切换：先乐观翻转本地覆盖 + 地图上立即生效（视觉即时，不再等服务器回显/轮询），
+   *  再 POST set-visible（幂等、明确目标值；服务器确认后移除覆盖）。 */
   const toggleVisible = (l: LayerSummary): void => {
     const next = !(visOverride[l.id] ?? l.visible)
     setVisOverride((o) => ({ ...o, [l.id]: next }))
+    applyMapVisibilityNow(props.mapRef.current, l.id, next)
     void action({ id: l.id, action: 'set-visible', visible: next })
   }
 

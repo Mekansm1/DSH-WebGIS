@@ -1,10 +1,38 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ComponentType } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type PointerEvent as ReactPointerEvent } from 'react'
 import type { GlobalStandardProps, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { useWebgisMode, webgisModeStore } from './webgisMode.js'
 import { ensure } from './chunk-loader.js'
 import { ModeSelector } from './ModeSelector.js'
 import type { WebgisT } from './webgis-i18n.js'
 import styles from './webgis.module.css'
+
+// ---- GIS 布局：地图与对话列之间的拖拽分隔条（对话列宽度） ----
+/** 对话列默认宽度（px）。 */
+const CHAT_W_DEFAULT = 360
+/** 对话列最小宽度（px）——再窄输入框就没法用了。 */
+const CHAT_W_MIN = 300
+/** 宽度持久化键（localStorage）。 */
+const CHAT_W_KEY = 'webgis.chatWidth'
+const CHAT_W_VAR = '--webgis-chat-width'
+
+/** 钳制对话列宽度：≥300px，且不超过视口一半（地图永远占大头）。 */
+function clampChatWidth(w: number): number {
+  const max = Math.max(CHAT_W_MIN, Math.round(window.innerWidth * 0.5))
+  const n = Math.round(Number.isFinite(w) ? w : CHAT_W_DEFAULT)
+  return Math.max(CHAT_W_MIN, Math.min(max, n))
+}
+
+/** 读持久化宽度（无/非法/隐私模式 → 默认值）。 */
+function readChatWidth(): number {
+  try {
+    const raw = localStorage.getItem(CHAT_W_KEY)
+    const v = raw == null ? NaN : Number(raw)
+    if (Number.isFinite(v) && v > 0) return clampChatWidth(v)
+  } catch {
+    // localStorage 不可用（隐私模式等）：用默认值
+  }
+  return CHAT_W_DEFAULT
+}
 
 /** 传给懒加载 MapView 的 props（手写镜像，与 MapView.tsx 的入参一致；跨 bundle 走运行参数注入）。 */
 export type GisMapCompProps = { sessionId?: string; t: WebgisT }
@@ -23,6 +51,8 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
   const prevCurrent = useRef<typeof current>(current)
   const gisRef = useRef<HTMLDivElement>(null)
   const lastLeft = useRef<number | null>(null)
+  /** 当前对话列宽度（拖动时实时更新；视口变化时重新钳制）。 */
+  const chatWidthRef = useRef(CHAT_W_DEFAULT)
 
   // ---- 启停开关：轮询 /webgis/status；关闭 → 整个 surface 隐藏（组件保持挂载，轮询继续才能检测重新开启） ----
   const [pluginEnabled, setPluginEnabledState] = useState(true)
@@ -75,6 +105,9 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
       return
     }
     root.dataset.webgisGis = ''
+    // 对话列宽度：应用持久化值（地图与对话列共用同一 CSS 变量）。
+    chatWidthRef.current = readChatWidth()
+    root.style.setProperty(CHAT_W_VAR, `${chatWidthRef.current}px`)
     /** 从侧栏槽向下找第一个有盒子的元素（其右缘即侧栏实际可见宽度）。 */
     const findSidebarBox = (rootEl: Element): Element | null => {
       const r = rootEl.getBoundingClientRect()
@@ -98,6 +131,12 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
     }
     const measure = () => {
       if (!el) return
+      // 视口变化时重新钳制对话列宽度（窗口变小 → 对话列不许超过 50vw，否则地图被挤没）
+      const cw = clampChatWidth(chatWidthRef.current)
+      if (cw !== chatWidthRef.current) {
+        chatWidthRef.current = cw
+        root.style.setProperty(CHAT_W_VAR, `${cw}px`)
+      }
       let left = 0
       // 量「侧栏实际可见内容」而非「宿主保留的列宽」：折叠时宿主保留网格列宽但把内容藏起来，
       // 量列宽会导致折叠区留白、地图不延伸。内容隐藏（折叠）→ 无可见盒子 → left=0，地图铺满。
@@ -144,11 +183,38 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
       delete root.dataset.webgisGis
       if (el) el.style.left = ''
       root.style.removeProperty('--webgis-sidebar-width')
+      root.style.removeProperty(CHAT_W_VAR)
       window.removeEventListener('resize', measure)
       observers.forEach((o) => o.disconnect())
       lastLeft.current = null
     }
   }, [mode, pluginEnabled])
+
+  /** 拖动分隔条：实时写 CSS 变量（不触发重渲染），松手持久化宽度。 */
+  const onResizeStart = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    const root = document.documentElement
+    const handle = e.currentTarget
+    const startX = e.clientX
+    const startW = chatWidthRef.current
+    let last = startW
+    handle.dataset.dragging = 'true'
+    handle.setPointerCapture(e.pointerId)
+    const onMove = (ev: PointerEvent): void => {
+      last = clampChatWidth(startW + (startX - ev.clientX))
+      chatWidthRef.current = last
+      root.style.setProperty(CHAT_W_VAR, `${last}px`)
+    }
+    const onUp = (): void => {
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
+      delete handle.dataset.dragging
+      try { localStorage.setItem(CHAT_W_KEY, String(last)) } catch { /* 隐私模式：不持久化 */ }
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onUp)
+  }
 
   // ---- 按需加载地图核心（gis 懒 chunk）：首次进 GIS 才拉 maplibre+MapView，加载中显示占位。
   const [MapComp, setMapComp] = useState<ComponentType<GisMapCompProps> | null>(null)
@@ -188,6 +254,14 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
         ) : (
           <div className={styles.gisLoading}>{mapLoading ? t('gis.mapLoading') : t('gis.mapLoadFailed')}</div>
         )}
+        {/* 地图/对话列分隔条：拖动调整对话列宽度（持久化） */}
+        <div
+          className={styles.chatResizer}
+          role="separator"
+          aria-orientation="vertical"
+          title={t('layout.resizeHint')}
+          onPointerDown={onResizeStart}
+        />
         {showToggle && (
           <button
             type="button"

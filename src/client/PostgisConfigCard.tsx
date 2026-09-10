@@ -26,6 +26,55 @@ const EMPTY: PostgisConfig = {
 type DbAction = 'test' | 'scan' | 'clear'
 
 /**
+ * 配置字段行。**必须在模块级定义**（不能在卡片组件内联）：内联组件每次重渲染都生成新函数引用，
+ * React 按引用比较组件类型 → 判定类型变了 → 每敲一个字符就把输入框卸载重挂 → 输入失焦。
+ */
+function Field(props: {
+  id: string
+  label: string
+  value: string
+  placeholder?: string
+  type?: string
+  saved: string
+  hint?: string
+  loading?: boolean
+  onChange: (v: string) => void
+  t: WebgisT
+}) {
+  const overridden = props.value !== props.saved
+  return (
+    <div className={styles.settingsField}>
+      <div className={styles.settingsFieldHead}>
+        <label className={styles.settingsFieldLabel} htmlFor={props.id}>{props.label}</label>
+        {overridden && (
+          <span className={styles.settingsFieldBadges}>
+            <span className={styles.settingsFieldBadge}>{props.t('settings.overridden')}</span>
+            <button
+              type="button"
+              className={styles.settingsFieldReset}
+              disabled={props.loading}
+              onClick={() => props.onChange(props.saved)}
+            >
+              {props.t('settings.restoreDefault')}
+            </button>
+          </span>
+        )}
+      </div>
+      <input
+        id={props.id}
+        className={styles.settingsFieldInput}
+        type={props.type ?? 'text'}
+        value={props.value}
+        placeholder={props.placeholder}
+        disabled={props.loading}
+        onChange={(e) => props.onChange(e.target.value)}
+      />
+      {props.hint && <p className={styles.settingsHint}>{props.hint}</p>}
+    </div>
+  )
+}
+
+/**
  * WebGIS 插件配置卡片内的「数据库」子区（由 WebgisConfigCard 组合）：PostgreSQL/PostGIS 连接配置。
  *
  * 外观与 VisionConfigCard 一致（折叠头 + 字段行 + 底部按钮，全部走 --dsw-alias-* token）。
@@ -152,49 +201,6 @@ export function PostgisConfigSection({ t }: { t: WebgisT }) {
   const set = (key: keyof Pick<PostgisConfig, 'host' | 'port' | 'database' | 'user' | 'password' | 'askFrom' | 'autoClusterFrom' | 'maxLoad'>) =>
     (v: string) => setCfg((c) => ({ ...c, [key]: v }))
 
-  const Field = (props: {
-    id: string
-    label: string
-    value: string
-    placeholder?: string
-    type?: string
-    saved: string
-    hint?: string
-    onChange: (v: string) => void
-  }) => {
-    const overridden = props.value !== props.saved
-    return (
-      <div className={styles.settingsField}>
-        <div className={styles.settingsFieldHead}>
-          <label className={styles.settingsFieldLabel} htmlFor={props.id}>{props.label}</label>
-          {overridden && (
-            <span className={styles.settingsFieldBadges}>
-              <span className={styles.settingsFieldBadge}>{t('settings.overridden')}</span>
-              <button
-                type="button"
-                className={styles.settingsFieldReset}
-                disabled={loading}
-                onClick={() => props.onChange(props.saved)}
-              >
-                {t('settings.restoreDefault')}
-              </button>
-            </span>
-          )}
-        </div>
-        <input
-          id={props.id}
-          className={styles.settingsFieldInput}
-          type={props.type ?? 'text'}
-          value={props.value}
-          placeholder={props.placeholder}
-          disabled={loading}
-          onChange={(e) => props.onChange(e.target.value)}
-        />
-        {props.hint && <p className={styles.settingsHint}>{props.hint}</p>}
-      </div>
-    )
-  }
-
   return (
     <div className={styles.settingsSubsection}>
       <button
@@ -215,10 +221,10 @@ export function PostgisConfigSection({ t }: { t: WebgisT }) {
       </button>
       {open && (
         <div className={styles.settingsBody}>
-          <Field id="webgis-pg-host" label="Host" value={cfg.host} saved={saved.host} placeholder={t('postgis.pgHostPh')} hint={t('postgis.pgHostHint')} onChange={set('host')} />
-          <Field id="webgis-pg-port" label="Port" value={cfg.port} saved={saved.port} placeholder="5432" hint={t('postgis.pgPortHint')} onChange={set('port')} />
-          <Field id="webgis-pg-database" label="Database" value={cfg.database} saved={saved.database} placeholder={t('postgis.pgDbPh')} hint={t('postgis.pgDbHint')} onChange={set('database')} />
-          <Field id="webgis-pg-user" label="User" value={cfg.user} saved={saved.user} placeholder={t('postgis.pgUserPh')} hint={t('postgis.pgUserHint')} onChange={set('user')} />
+          <Field id="webgis-pg-host" label="Host" value={cfg.host} saved={saved.host} placeholder={t('postgis.pgHostPh')} hint={t('postgis.pgHostHint')} onChange={set('host')} t={t} loading={loading} />
+          <Field id="webgis-pg-port" label="Port" value={cfg.port} saved={saved.port} placeholder="5432" hint={t('postgis.pgPortHint')} onChange={set('port')} t={t} loading={loading} />
+          <Field id="webgis-pg-database" label="Database" value={cfg.database} saved={saved.database} placeholder={t('postgis.pgDbPh')} hint={t('postgis.pgDbHint')} onChange={set('database')} t={t} loading={loading} />
+          <Field id="webgis-pg-user" label="User" value={cfg.user} saved={saved.user} placeholder={t('postgis.pgUserPh')} hint={t('postgis.pgUserHint')} onChange={set('user')} t={t} loading={loading} />
           <Field
             id="webgis-pg-password"
             label="Password"
@@ -228,12 +234,14 @@ export function PostgisConfigSection({ t }: { t: WebgisT }) {
             placeholder={saved.passwordSet ? t('postgis.pgPwdPhSet') : t('postgis.pgPwdPhEmpty')}
             hint={saved.passwordSet ? `${t('postgis.pgPwdHintSet')}${t('postgis.pgPwdHintGui')}` : t('postgis.pgPwdHintGui')}
             onChange={set('password')}
+            t={t}
+            loading={loading}
           />
 
           <p className={styles.settingsSectionLabel}>{t('postgis.thresholdLabel')}</p>
-          <Field id="webgis-pg-askfrom" label={t('postgis.askFromLabel')} value={cfg.askFrom} saved={saved.askFrom} placeholder="50000" hint={t('postgis.askFromHint')} onChange={set('askFrom')} />
-          <Field id="webgis-pg-autocluster" label={t('postgis.autoClusterLabel')} value={cfg.autoClusterFrom} saved={saved.autoClusterFrom} placeholder="100000" hint={t('postgis.autoClusterHint')} onChange={set('autoClusterFrom')} />
-          <Field id="webgis-pg-maxload" label={t('postgis.maxLoadLabel')} value={cfg.maxLoad} saved={saved.maxLoad} placeholder="200000" hint={t('postgis.maxLoadHint')} onChange={set('maxLoad')} />
+          <Field id="webgis-pg-askfrom" label={t('postgis.askFromLabel')} value={cfg.askFrom} saved={saved.askFrom} placeholder="50000" hint={t('postgis.askFromHint')} onChange={set('askFrom')} t={t} loading={loading} />
+          <Field id="webgis-pg-autocluster" label={t('postgis.autoClusterLabel')} value={cfg.autoClusterFrom} saved={saved.autoClusterFrom} placeholder="100000" hint={t('postgis.autoClusterHint')} onChange={set('autoClusterFrom')} t={t} loading={loading} />
+          <Field id="webgis-pg-maxload" label={t('postgis.maxLoadLabel')} value={cfg.maxLoad} saved={saved.maxLoad} placeholder="200000" hint={t('postgis.maxLoadHint')} onChange={set('maxLoad')} t={t} loading={loading} />
 
           <div className={styles.settingsActions}>
             <button

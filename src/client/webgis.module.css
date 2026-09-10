@@ -616,6 +616,41 @@
   font-size: 10px;
 }
 
+.attrPager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid #2d3a4f;
+  font-size: 11px;
+  color: #9aa8bc;
+}
+
+.attrPagerInfo {
+  flex: 1;
+}
+
+.attrPagerBtn {
+  appearance: none;
+  background: #243044;
+  border: 1px solid #2d3a4f;
+  color: #e7ecf3;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.attrPagerBtn:hover:not(:disabled) {
+  background: #2d3a4f;
+}
+
+.attrPagerBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ============ 设置页：WebGIS 视觉模型配置卡片 ============ */
 /* 外观复刻 DSH 内置插件卡片（settings-plugins 包的 PluginCard + ValueField）：
    折叠头（名称/描述/chevron）+ 展开后的字段行 + 底部「放弃修改/保存」，
@@ -1293,13 +1328,15 @@
   left: var(--webgis-sidebar-width, 0px);
   top: 0;
   bottom: 0;
-  right: 440px;
+  /* 对话列宽度由 --webgis-chat-width 统一控制（GisSurface 拖动分隔条写入并持久化；
+     缺省 360px）。地图与对话列引用同一变量，避免两处硬编码漂移。 */
+  right: var(--webgis-chat-width, 360px);
 }
 
 /* 2. 对话列：右侧 440px 嵌入面板（conversation 槽也是 display:contents，实际盒是 [data-phase]） */
 :global(html[data-webgis-gis]) [data-slot="conversation"] > [data-phase] {
-  width: 440px;
-  flex: 1 0 auto;
+  width: var(--webgis-chat-width, 360px);
+  flex: 0 0 auto;
   min-height: 0;
   align-self: flex-end;
   background: var(--dsw-alias-bg-base, #1a2334);
@@ -1400,4 +1437,35 @@
   color: #9aa8bc;
   font-size: 13px;
   background: rgba(13, 17, 23, 0.6);
+}
+
+/* ============ GIS 布局：地图/对话列之间的拖拽分隔条 ============ */
+
+.chatResizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 8px;
+  z-index: 25;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+/* 悬停/拖动时给一条可见竖线提示可拖 */
+.chatResizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.chatResizer:hover::after,
+.chatResizer[data-dragging='true']::after {
+  background: var(--dsw-alias-border-l2, #3b82f6);
 }
