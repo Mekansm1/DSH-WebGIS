@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dedupeFeatures, groupFeaturesByName } from '../lib/client/basemap-extract.js'
-import { BASEMAP_LAYERS, basemapLayerCatalog, resolveBasemapLayer } from '../lib/basemap-layers.js'
+import { dedupeFeatures, geometryKind, groupFeaturesByName } from '../lib/client/basemap-extract.js'
+import { BASEMAP_LAYERS, basemapLayerCatalog, defaultExportLayerNames, resolveBasemapLayer } from '../lib/basemap-layers.js'
 
 /** 最小 MapGeoJSONFeature 桩（只喂去重/归组用到的字段）。 */
 function feat(over = {}) {
@@ -126,4 +126,43 @@ test('底图图层目录: 每条完整，且道路被明确标注不带 name', (
   // 河流自带 name
   assert.equal(BASEMAP_LAYERS.find((s) => s.sourceLayer === 'waterway').hasName, true)
   assert.match(basemapLayerCatalog(), /waterway（河流\/水道）/)
+})
+
+// ---- 默认导出：全部内容图层 → 点/线/面三个图层 ----
+
+test('geometryKind: 几何类型归到点/线/面三族，未知返回 null', () => {
+  assert.equal(geometryKind('Point'), 'point')
+  assert.equal(geometryKind('MultiPoint'), 'point')
+  assert.equal(geometryKind('LineString'), 'line')
+  assert.equal(geometryKind('MultiLineString'), 'line')
+  assert.equal(geometryKind('Polygon'), 'polygon')
+  assert.equal(geometryKind('MultiPolygon'), 'polygon')
+  assert.equal(geometryKind('GeometryCollection'), null)
+  assert.equal(geometryKind(undefined), null)
+})
+
+test('defaultExportLayerNames: 含全部内容图层，排除标注图层（那是渲染用的文字，不是地物）', () => {
+  const names = defaultExportLayerNames()
+  for (const want of ['waterway', 'water', 'transportation', 'building', 'park', 'landuse', 'landcover', 'boundary', 'poi', 'aeroway']) {
+    assert.ok(names.includes(want), `默认导出应包含 ${want}`)
+  }
+  for (const skip of ['transportation_name', 'water_name', 'place', 'housenumber']) {
+    assert.ok(!names.includes(skip), `默认导出不应包含标注图层 ${skip}`)
+  }
+})
+
+test('目录: 标注图层被标记 label，且清单里单独列出（模型能看出它们是点名才取的）', () => {
+  const labels = BASEMAP_LAYERS.filter((s) => s.label)
+  assert.ok(labels.length >= 3)
+  for (const l of labels) assert.ok(!defaultExportLayerNames().includes(l.sourceLayer))
+  const catalog = basemapLayerCatalog()
+  assert.match(catalog, /标注图层（默认导出不含，点名才取）/)
+  assert.match(catalog, /transportation_name/)
+})
+
+test('groupFeaturesByName: 归组键含图层名 —— 同名公园面与 POI 点不会被并成一个要素', () => {
+  const park = feat({ id: 1, properties: { name: '人民公园' }, sourceLayer: 'park' })
+  const poi = feat({ id: 2, properties: { name: '人民公园' }, sourceLayer: 'poi' })
+  const out = groupFeaturesByName([park, poi])
+  assert.equal(out.length, 2, '不同图层的同名要素应各自独立')
 })

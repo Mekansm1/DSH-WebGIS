@@ -126,7 +126,11 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     try {
       const res = extractBasemapFeatures(map, req.params)
       payload = res.ok
-        ? { seq: req.seq, ok: true, geojson: res.geojson, source: res.source, rawCount: res.rawCount, dedupedCount: res.dedupedCount, featureCount: res.featureCount, names: res.names, classes: res.classes }
+        ? {
+            seq: req.seq, ok: true, groups: res.outputs, source: res.source,
+            rawCount: res.rawCount, dedupedCount: res.dedupedCount, usedLayers: res.usedLayers,
+            names: res.names, classes: res.classes, note: res.note,
+          }
         : { seq: req.seq, ok: false, message: res.message }
     } catch (err) {
       payload = { seq: req.seq, ok: false, message: `底图要素提取失败：${err instanceof Error ? err.message : String(err)}` }

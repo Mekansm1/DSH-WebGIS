@@ -6,6 +6,7 @@
  * host 只接收结果并落成图层。
  */
 import { json, jsonError, MAX_PICK_BODY, readBody } from './http-utils.js'
+import type { BasemapExportGroup } from './session-state.js'
 import type { RouteApi, RouteHandler } from './route-shared.js'
 
 export const handleBasemapExtract: RouteHandler = (req, res, _url, _pathname, _sessionId, state, _api) => {
@@ -14,8 +15,8 @@ export const handleBasemapExtract: RouteHandler = (req, res, _url, _pathname, _s
       const raw = await readBody(req, MAX_PICK_BODY)
       const data = JSON.parse(raw) as {
         seq?: unknown; ok?: unknown; message?: unknown
-        geojson?: unknown; source?: unknown; rawCount?: unknown
-        dedupedCount?: unknown; featureCount?: unknown; names?: unknown; classes?: unknown
+        groups?: unknown; source?: unknown; rawCount?: unknown; note?: unknown
+        dedupedCount?: unknown; usedLayers?: unknown; names?: unknown; classes?: unknown
       }
       const seq = Number(data.seq)
       if (!Number.isInteger(seq) || seq <= 0) return void jsonError(res, 400, 'seq 参数非法')
@@ -29,21 +30,35 @@ export const handleBasemapExtract: RouteHandler = (req, res, _url, _pathname, _s
         return void json(res, { ok: true })
       }
 
-      const geojson = data.geojson as { type?: string; features?: unknown } | undefined
-      if (!geojson || geojson.type !== 'FeatureCollection' || !Array.isArray(geojson.features)) {
-        return void jsonError(res, 400, 'geojson 需为 FeatureCollection')
+      const rawGroups = Array.isArray(data.groups) ? data.groups : []
+      const groups: BasemapExportGroup[] = []
+      for (const g of rawGroups as Array<Record<string, unknown>>) {
+        const gj = g?.geojson as { type?: string; features?: unknown } | undefined
+        if (!gj || gj.type !== 'FeatureCollection' || !Array.isArray(gj.features)) continue
+        const kind = g?.kind
+        if (kind !== 'point' && kind !== 'line' && kind !== 'polygon') continue
+        groups.push({
+          kind,
+          geojson: gj as never,
+          featureCount: Number.isFinite(Number(g.featureCount)) ? Number(g.featureCount) : gj.features.length,
+          sourceLayers: Array.isArray(g.sourceLayers)
+            ? (g.sourceLayers as unknown[]).filter((s): s is string => typeof s === 'string')
+            : [],
+        })
       }
+      if (groups.length === 0) return void jsonError(res, 400, 'groups 需至少含一组有效要素集')
       state.basemapResult = {
         id: seq,
-        geojson: geojson as never,
+        groups,
         source: typeof data.source === 'string' ? data.source : '',
         rawCount: Number.isFinite(Number(data.rawCount)) ? Number(data.rawCount) : 0,
         dedupedCount: Number.isFinite(Number(data.dedupedCount)) ? Number(data.dedupedCount) : 0,
-        featureCount: Number.isFinite(Number(data.featureCount)) ? Number(data.featureCount) : geojson.features.length,
+        usedLayers: Array.isArray(data.usedLayers) ? (data.usedLayers as unknown[]).filter((s): s is string => typeof s === 'string') : [],
         names: Array.isArray(data.names) ? (data.names as unknown[]).filter((n): n is string => typeof n === 'string') : [],
         classes: (data.classes && typeof data.classes === 'object' ? data.classes : {}) as Record<string, number>,
+        ...(typeof data.note === 'string' && data.note ? { note: data.note } : {}),
       }
-      json(res, { ok: true, id: seq, featureCount: state.basemapResult.featureCount })
+      json(res, { ok: true, id: seq, groups: groups.length })
     } catch (err) {
       return void jsonError(res, 400, err instanceof Error ? err.message : '底图要素回传失败')
     }
