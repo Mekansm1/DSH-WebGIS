@@ -4,7 +4,7 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { PickState, WebgisState } from './session-state.js'
+import type { BasemapExportResult, PickState, WebgisState } from './session-state.js'
 
 /** 每类元素在模型侧渲染为一条文本。 */
 export function text(content: string): ContentBlock[] {
@@ -52,6 +52,42 @@ export async function awaitCurrentViewCapture(
 
 /** 出图结果等待上限（出图含用户弹窗确认/合成，放宽到 60s）。 */
 export const EXPORT_WAIT_MS = 60000
+
+/** 底图要素提取的等待上限（纯内存操作，不该慢；留足客户端慢帧的余量）。 */
+export const BASEMAP_WAIT_MS = 15000
+
+/**
+ * 等待客户端完成一次「底图矢量要素提取」并回传（配合 webgis_export_basemap 使用）：
+ * 工具先把 basemapRequest 置为 { seq, params }，客户端轮询 state 看到后按当前视窗提取，
+ * 再 POST /webgis/basemap-extract 带回同 seq。
+ *
+ * 三个出口：拿到结果 / 客户端报告失败（basemapError，立即返回）/ 超时。
+ */
+/** 供 host 侧单测直接构造测试状态使用（仅此用途；exported for tests）。 */
+export async function awaitBasemapExtraction(
+  state: WebgisState,
+  seq: number,
+  waitMs: number = BASEMAP_WAIT_MS,
+): Promise<{ ok: true; result: BasemapExportResult } | { ok: false; message: string }> {
+  const deadline = Date.now() + waitMs
+  while (Date.now() < deadline) {
+    await delay(POLL_STEP_MS)
+    const r = state.basemapResult
+    if (r && r.id === seq) {
+      state.basemapRequest = null
+      state.basemapError = null
+      return { ok: true, result: r }
+    }
+    if (state.basemapError) {
+      const message = state.basemapError
+      state.basemapRequest = null
+      state.basemapError = null
+      return { ok: false, message }
+    }
+  }
+  state.basemapRequest = null
+  return { ok: false, message: '等待底图要素提取超时（请确认地图在 GIS 模式可见，且当前底图是矢量底图）' }
+}
 
 export type ExportWaitResult =
   | { ok: true; image: { id: number; ref: ImageAttachmentRef; width: number; height: number; title?: string } }

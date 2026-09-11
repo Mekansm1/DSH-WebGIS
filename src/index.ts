@@ -42,7 +42,7 @@ import type { FeatureCollection } from 'geojson'
 // 声明合并触发器：让 ctx.webServer / 会话类型可见
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-session'
-import { awaitCurrentViewCapture, awaitExportCompletion, text } from './wait-utils.js'
+import { awaitBasemapExtraction, awaitCurrentViewCapture, awaitExportCompletion, text } from './wait-utils.js'
 export { awaitCurrentViewCapture, awaitExportCompletion } from './wait-utils.js'
 import { arrowCacheClearSession, dropLayerResources } from './arrow-cache.js'
 export { dropLayerResources } from './arrow-cache.js'
@@ -62,6 +62,7 @@ import {
 } from './routes-state.js'
 import { handleExport, handleImport, handleLayerAction } from './routes-layers.js'
 import { handleAttachment, handleExportImage } from './routes-export.js'
+import { handleBasemapExtract } from './routes-basemap.js'
 import {
   handlePostgisAction, handlePostgisConfigGet, handlePostgisConfigPost,
   handleVisionConfigGet, handleVisionConfigPost,
@@ -140,6 +141,7 @@ export function apply(ctx: Context, config: Config): void {
     const st: WebgisState = {
       dataset: null, navigate: null, pick: null, capture: null, captureError: null,
       exportRequest: null, exportImage: null, exportError: null,
+      basemapRequest: null, basemapResult: null, basemapError: null,
       layers: [],
     }
     // 已配置默认数据集时，新会话各自带上独立副本（后续加载别的数据不影响其他会话）。
@@ -229,7 +231,7 @@ export function apply(ctx: Context, config: Config): void {
     })
     st.layers = [layer, ...st.layers.filter((l) => l.id !== 'dataset')]
   }
-  const seqs = { navigateSeq: 0, captureSeq: 0, pickSeq: 0, importSeq: 0, datasetSeq: 0, exportSeq: 0 }
+  const seqs = { navigateSeq: 0, captureSeq: 0, pickSeq: 0, importSeq: 0, datasetSeq: 0, exportSeq: 0, basemapSeq: 0 }
 
   // ---- 启停开关：启动时读一次持久化开关（默认启用；失败静默，与视觉/PostGIS 配置读取同模式）----
   loadPluginEnabled()
@@ -393,6 +395,7 @@ export function apply(ctx: Context, config: Config): void {
     route('POST', '/webgis/import', handleImport),
     route(null, '/webgis/export', handleExport),
     route('POST', '/webgis/export-image', handleExportImage),
+    route('POST', '/webgis/basemap-extract', handleBasemapExtract),
     route('GET', '/webgis/attachment', handleAttachment),
     route('GET', '/webgis/vision-config', handleVisionConfigGet),
     route('POST', '/webgis/vision-config', handleVisionConfigPost),
@@ -1022,6 +1025,16 @@ export function apply(ctx: Context, config: Config): void {
   // onRemoveLayer 联动释放图层引用的外部资源（DuckDB 内存表 DROP，见 src/duckdb.ts）。
   registerGeoTools(ctx, stateFor, {
     onRemoveLayer: dropLayerResources,
+    // 「导出当前视野的底图数据」：置请求 → 等客户端按当前视窗从矢量瓦片提取并回传。
+    // 提取必须在浏览器做 —— 瓦片已由 maplibre 解码成带经纬度的 GeoJSON 存在内存里，host 拿不到。
+    exportBasemapFeatures: async (sessionId, params) => {
+      const st = stateFor(sessionId)
+      const seq = ++seqs.basemapSeq
+      st.basemapResult = null
+      st.basemapError = null
+      st.basemapRequest = { seq, params }
+      return awaitBasemapExtraction(st, seq)
+    },
   })
 
   // ---- PostgreSQL/PostGIS 工具：库结构读取 + 只读查询 → 图层（source: 'postgis'） ----

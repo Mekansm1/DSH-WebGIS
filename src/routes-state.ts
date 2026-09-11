@@ -31,6 +31,8 @@ export const handleState: RouteHandler = (_req, res, _url, _pathname, _sessionId
     capture: state.capture,
     // 出图请求（AI 工具置；客户端见新 seq 打开弹窗预填）与最近一次出图元信息（不含附件 ref，客户端不需要）。
     exportRequest: state.exportRequest,
+    // 底图要素导出请求（AI 工具置；客户端见新 seq 后按当前视窗提取并回传 /webgis/basemap-extract）。
+    basemapRequest: state.basemapRequest,
     exportImage: state.exportImage
       ? { id: state.exportImage.id, width: state.exportImage.width, height: state.exportImage.height, title: state.exportImage.title }
       : null,

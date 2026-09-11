@@ -90,6 +90,30 @@ export interface ExportImageResult {
   title?: string
 }
 
+/** AI 工具下发的「导出底图矢量要素」请求参数（客户端按当前视窗提取后回传）。 */
+export interface BasemapExportParams {
+  /** MVT 的 source-layer 名（如 'waterway'）。 */
+  sourceLayer: string
+  /** 只保留 name 包含该串的要素。 */
+  name?: string
+  /** 只保留 class 命中的要素。 */
+  classes?: string[]
+  /** 按 name 归组（每条河一个要素）。 */
+  group?: boolean
+}
+
+/** 客户端回传的底图要素提取结果（geojson 已是经纬度坐标）。 */
+export interface BasemapExportResult {
+  id: number
+  geojson: GeoJson
+  source: string
+  rawCount: number
+  dedupedCount: number
+  featureCount: number
+  names: string[]
+  classes: Record<string, number>
+}
+
 /** 单个会话的完整地图状态（默认数据集 + 导航意图 + 最近点击 + 图层注册表）。 */
 export interface WebgisState {
   dataset: DatasetInfo | null
@@ -105,6 +129,12 @@ export interface WebgisState {
   exportError: string | null
   /** 最近一次出图结果（附件引用；AI 工具 webgis_get_export_map 读取）。 */
   exportImage: ExportImageResult | null
+  /** host 发起的「导出底图矢量要素」请求（AI 工具 webgis_export_basemap 设置；客户端见新 seq → 提取后回传）。 */
+  basemapRequest: { seq: number; params: BasemapExportParams } | null
+  /** 客户端回传的提取结果（等待者消费后保留，便于诊断）。 */
+  basemapResult: BasemapExportResult | null
+  /** 提取失败原因（客户端上报，等待者立刻返回而不用干等超时）。 */
+  basemapError: string | null
   /**
    * 图层注册表（source-agnostic）：`dataset` 是基础数据集层，GIS 结果工具（webgis_buffer 等）
    * 产出 `result_<n>` 图层；PostGIS 查询结果产出 `db_<n>`。客户端靠每层的 rev 做变更检测。
@@ -119,6 +149,7 @@ export function emptyWebgisState(): WebgisState {
   return {
     dataset: null, navigate: null, pick: null, capture: null, captureError: null,
     exportRequest: null, exportImage: null, exportError: null,
+    basemapRequest: null, basemapResult: null, basemapError: null,
     layers: [],
   }
 }

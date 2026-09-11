@@ -11,6 +11,7 @@ import type { BBox, FeatureCollection } from 'geojson'
 import type { DisplayMode, GisLayer, ModeParams } from './geo-processing.js'
 import { RESULT_COLORS, makeResultLayer, requireLayer } from './geo-processing.js'
 import { normalizeColor } from './postgis.js'
+import type { BasemapExportParams, BasemapExportResult } from './session-state.js'
 
 /** 工具层所需的注册表状态（index.ts 传入的 state 结构上满足此接口）。 */
 export interface GeoRegistryState {
@@ -55,6 +56,14 @@ export interface ToolExec {
 export interface LayerLifecycleHooks {
   /** 图层被移除/清空时回调（传入被移除的图层；fire-and-forget，异步清理不阻塞工具返回）。 */
   onRemoveLayer?: (layer: GisLayer) => void
+  /**
+   * host 侧回调：请客户端按当前视窗从底图矢量瓦片导出要素（index.ts 接线到 state + 等待器）。
+   * 提取只能在浏览器做 —— 瓦片已经以解码后的形式在 maplibre 内存里，host 拿不到。
+   */
+  exportBasemapFeatures?: (
+    sessionId: string | undefined,
+    params: BasemapExportParams,
+  ) => Promise<{ ok: true; result: BasemapExportResult } | { ok: false; message: string }>
 }
 
 /** 每个产出图层的工具输出 schema（as const 让 defineTool 精确推断输出类型）。 */
@@ -209,7 +218,7 @@ export interface GeoToolRuntime {
     mode?: DisplayMode,
     modeParams?: ModeParams,
   ) => PushResultOutput
-  /** 图层生命周期钩子（remove/clear 联动释放外部资源时用）。 */
+  /** host 侧钩子（图层生命周期 + 底图要素导出请求转发）。 */
   hooks: LayerLifecycleHooks | undefined
   /** 展示方式切换：校验几何兼容性后原地改 mode/modeParams，不 bump rev。 */
   applyMode: (layer: GisLayer, mode: DisplayMode, params?: ModeParams) => string | null

@@ -23,6 +23,8 @@ import { EMPTY_COLLECTION, applyBaseMap, baseStyle, fmtCoord, ensureDataLayers, 
 import { useMapMeasure } from './use-map-measure.js'
 import { createLayerSync } from './layer-sync.js'
 import { SEL_SRC, ensureSelLayers, clearMapSelection, setMapSelection, isSelectionLayerId } from './map-highlight.js'
+import { extractBasemapFeatures } from './basemap-extract.js'
+import type { BasemapExportParams } from '../session-state.js'
 import { isScalar, scalarRows, featureTitle, fmtCell, makeAttrTable, buildPopupContent } from './map-popup.js'
 import { queryFeatures, collectCoords, captureMapScreenshot, drawPin, fitToGeoJSON, clearPick, recordPick } from './map-pick.js'
 import type { ScreenshotPayload } from './map-pick.js'
@@ -41,6 +43,8 @@ interface StateResponse {
     params?: { title?: string; layerIds?: string[]; legend?: boolean; north?: boolean; scale?: boolean; note?: string; extent?: 'view' | 'all' }
   } | null
   exportImage: { id: number; width: number; height: number; title?: string } | null
+  /** host 发起的底图要素导出（AI 工具 webgis_export_basemap）：见新 seq → 按当前视窗提取并回传。 */
+  basemapRequest: { seq: number; params: BasemapExportParams } | null
   /** 图层注册表摘要（无 geojson）：rev 变化时按 id 拉全量渲染。 */
   layers: LayerSummary[]
 }
@@ -110,7 +114,37 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     }
   }
 
+  /**
+   * 执行一次「底图要素导出」并回传 host：按当前视窗从矢量瓦片提取 → POST /webgis/basemap-extract。
+   * 失败（栅格底图 / 视野内无该图层 / 筛选后为空）也要回传，让等待中的工具立刻拿到原因，而不是干等超时。
+   */
+  const runBasemapExtract = async (
+    map: maplibregl.Map,
+    req: { seq: number; params: BasemapExportParams },
+  ): Promise<void> => {
+    let payload: Record<string, unknown>
+    try {
+      const res = extractBasemapFeatures(map, req.params)
+      payload = res.ok
+        ? { seq: req.seq, ok: true, geojson: res.geojson, source: res.source, rawCount: res.rawCount, dedupedCount: res.dedupedCount, featureCount: res.featureCount, names: res.names, classes: res.classes }
+        : { seq: req.seq, ok: false, message: res.message }
+    } catch (err) {
+      payload = { seq: req.seq, ok: false, message: `底图要素提取失败：${err instanceof Error ? err.message : String(err)}` }
+    }
+    try {
+      await fetch(sessionUrl(sessionRef.current, '/webgis/basemap-extract'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    } catch (err) {
+      console.warn('[MapView] 底图要素回传失败', err)
+    }
+  }
+
   const lastNavigateId = useRef(0)
+  /** 最近一次已处理的底图要素导出请求 seq（避免同一次请求被重复执行）。 */
+  const lastBasemapSeq = useRef(0)
   /** 最近一轮 /webgis/state 的指纹：轮询时状态没变就整轮跳过（空转零开销）。 */
   const pollFpRef = useRef('')
   const lastCaptureSeq = useRef(0)
@@ -621,6 +655,13 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
           openExport(p
             ? { title: p.title, layerIds: p.layerIds, legend: p.legend, north: p.north, scale: p.scale, note: p.note, extent: p.extent }
             : {})
+        }
+
+        // AI 底图要素导出（webgis_export_basemap）：见新 seq → 按当前视窗从矢量瓦片提取并回传。
+        // 纯内存读取，无需用户确认，也就没有弹窗。
+        if (st.basemapRequest && st.basemapRequest.seq !== lastBasemapSeq.current) {
+          lastBasemapSeq.current = st.basemapRequest.seq
+          void runBasemapExtract(map, st.basemapRequest)
         }
 
         stBaseTileUrlRef.current = st.baseTileUrl

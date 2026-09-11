@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { awaitExportCompletion } from '../lib/wait-utils.js'
+import { awaitBasemapExtraction, awaitExportCompletion } from '../lib/wait-utils.js'
 
 /** 最小 WebgisState 桩（只喂等待器用到的字段）。 */
 function stateStub(over = {}) {
@@ -45,4 +45,47 @@ test('awaitExportCompletion: 超时文案明确不要再重试', async () => {
   assert.match(r.message, /超时/)
   assert.match(r.message, /不要反复重试/)
   assert.equal(st.exportRequest, null)
+})
+
+// ---- 底图要素提取等待器（与出图同构：结果 / 失败 / 超时 三个出口） ----
+
+test('awaitBasemapExtraction: 收到同 seq 的结果 → ok，并清掉请求', async () => {
+  const st = stateStub({
+    basemapRequest: { seq: 3, params: { sourceLayer: 'waterway' } },
+    basemapResult: { id: 3, geojson: { type: 'FeatureCollection', features: [] }, featureCount: 12, names: ['白浪河'] },
+  })
+  const r = await awaitBasemapExtraction(st, 3, 500)
+  assert.equal(r.ok, true)
+  assert.equal(r.result.featureCount, 12)
+  assert.equal(st.basemapRequest, null)
+})
+
+// 关键：栅格底图 / 视野内无该图层时，客户端要主动上报失败，让工具立刻拿到原因，
+// 而不是干等到超时（用户看到的会是"卡住"）。
+test('awaitBasemapExtraction: 客户端上报失败 → 立刻返回原因，不干等超时', async () => {
+  const st = stateStub({
+    basemapRequest: { seq: 3, params: { sourceLayer: 'waterway' } },
+    basemapError: '当前底图是光栅瓦片，没有可提取的矢量数据。',
+  })
+  const started = Date.now()
+  const r = await awaitBasemapExtraction(st, 3, 30_000)
+  assert.equal(r.ok, false)
+  assert.match(r.message, /光栅瓦片/)
+  assert.ok(Date.now() - started < 2000, '应立刻返回')
+  assert.equal(st.basemapError, null)
+  assert.equal(st.basemapRequest, null)
+})
+
+test('awaitBasemapExtraction: seq 不匹配不算本次结果；超时文案给出可行动提示', async () => {
+  const other = stateStub({
+    basemapRequest: { seq: 3, params: { sourceLayer: 'waterway' } },
+    basemapResult: { id: 2, geojson: { type: 'FeatureCollection', features: [] }, featureCount: 1 },
+  })
+  assert.equal((await awaitBasemapExtraction(other, 3, 300)).ok, false)
+
+  const st = stateStub({ basemapRequest: { seq: 3, params: { sourceLayer: 'waterway' } } })
+  const r = await awaitBasemapExtraction(st, 3, 300)
+  assert.equal(r.ok, false)
+  assert.match(r.message, /矢量底图/)
+  assert.equal(st.basemapRequest, null)
 })
