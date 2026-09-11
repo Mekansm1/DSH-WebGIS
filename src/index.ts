@@ -8,7 +8,7 @@ import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 // dsh-settings 0.1.2-rc.1 起重构成 SettingsProvider，旧顶层 installSettingsSection/settingsNamespace 已移除。
 // 用 namespace 导入(而非具名)+运行时探测兼容新旧——否则任一版本缺该具名导出会直接启动期 SyntaxError。
 import * as dshSettingsModule from '@deepseek-ai/dsh-settings'

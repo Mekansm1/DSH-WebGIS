@@ -14,7 +14,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { FeatureCollection } from 'geojson'
 import { BASEMAP_LAYERS, basemapLayerCatalog, resolveBasemapLayer } from './basemap-layers.js'
 import type { GeoToolRuntime } from './geo-tools-runtime.js'

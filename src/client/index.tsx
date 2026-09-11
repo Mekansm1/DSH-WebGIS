@@ -1,5 +1,10 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// 加载 SlotMap 增强：shell.overlay / conversation.* / settings.* 等 slot 键的类型声明
+import type { Context } from '@deepseek-ai/cordis'
+// 仅类型副作用，加载三处模块增补（0.1.5 起 ClientContext 已随 dsh-client-runtime 撤销，直接用 cordis 的 Context）：
+// - renderer/client：ctx.slots（槽位注册表）
+// - session/client：GlobalStandardProps.useSessions（会话列表快照）
+// - layout / conversation / settings-plugins：shell.overlay / conversation.* / settings.* 的 SlotMap 槽键
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
@@ -7,9 +12,12 @@ import { GisSurface } from './GisSurface.js'
 import { WebgisConfigCard } from './WebgisConfigCard.js'
 import { installWebgisLocale, WEBGIS_NS } from './webgis-i18n.js'
 
+// cordis 服务等待：slots（槽位注册表）与 locale（词典）。二者由哪个包提供随宿主版本变过：
+// ≤0.1.2 是 dsh-client-runtime，0.1.5+ 拆到 dsh-client-ui-renderer。package.json 的
+// dsh.client.inject 两个包名都列了，是给宿主做「模块工厂先到」排序用的边，多列一个无效名无害。
 export const inject = ['slots', 'locale']
 
-export function apply(ctx: ClientContext): void {
+export function apply(ctx: Context): void {
   // 注册插件词典命名空间 'webgis'（zh/en 成对）；须先于下面两个 slot 入口挂载——
   // 即便后到，LocaleRuntime.register 也会 bump revision 让已渲染入口重渲染。
   installWebgisLocale(ctx)

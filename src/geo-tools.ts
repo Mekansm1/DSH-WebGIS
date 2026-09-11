@@ -14,6 +14,9 @@
  * （调度器串行化写），重操作设 `timeoutMs` 兜底。
  */
 import type { Context } from '@deepseek-ai/cordis'
+// 仅类型副作用：把 systemPrompt 服务并进 Context 的模块增补（值 import 会被 tsdown purity 拒绝）。
+// 过去这条增补靠 dsh-agent 的传递依赖被顺带加载，依赖树收敛后必须显式引入。
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import { createGeoToolRuntime } from './geo-tools-runtime.js'
 import type { GeoRegistryState, LayerLifecycleHooks } from './geo-tools-runtime.js'
 import { registerConstructTools } from './geo-construct-tools.js'
