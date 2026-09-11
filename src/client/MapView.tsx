@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentType } from 'react'
 import maplibregl from 'maplibre-gl'
-import type { GeoJSONSource, Map as MapLibreMap, Point, RasterTileSource } from 'maplibre-gl'
+import type { GeoJSONSource, Map as MapLibreMap, MapGeoJSONFeature, Point, RasterTileSource } from 'maplibre-gl'
 import styles from './webgis.module.css'
 import { LayerPanel } from './LayerPanel.js'
 import { AttributeDrawer } from './AttributeDrawer.js'
@@ -30,6 +30,12 @@ import { queryFeatures, collectCoords, captureMapScreenshot, drawPin, fitToGeoJS
 import type { ScreenshotPayload } from './map-pick.js'
 import { renderKinds, makeRenderLayer, darkenHex, maxDensityOf, hexHeightFor, makeHeatLayer, makeHexLayer, CLUSTER_BASE_RADIUS, shadeColor, clusterColorFor, clusterRadius, makeClusterLayer, makeClusterCountLayer, LAYER_KINDS, ALL_RENDER_SUFFIXES, RENDER_ROW_KEY, RENDER_LAYER_KEY, DECK_MODES, SRC, RID, SRC_HEX, layerShapeKey } from './map-render-spec.js'
 import type { RenderKind, RenderStyle } from './map-render-spec.js'
+
+/**
+ * 点选容差（像素）。精确命中落空时，扩成 (2t+1)² 的方框再查一次。
+ * 8px 接近触摸屏的常规容差：既能捞回 1px 宽的线和半径 2px 的点，又不至于抓到明显不在光标下的东西。
+ */
+const PICK_TOLERANCE_PX = 8
 
 interface StateResponse {
   baseTileUrl: string
@@ -468,11 +474,22 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       let topPayload: FeaturePayload | null = null
       let topGeometry: unknown = null
       const payloads: FeaturePayload[] = []
-      for (const f of map.queryRenderedFeatures(e.point).slice(0, 30)) {
-        if (f.properties?.cluster_id != null) continue // 排除聚合圈自身（聚合已在上面处理）
-        // 排除点击高亮层自身：它被置顶，会抢走 topPayload，而它的 properties 是空的
-        // → 表现为「同一要素第二次点选提示无属性字段」。
-        if (isSelectionLayerId(f.layer.id)) continue
+      // 可拾取：排除聚合圈自身（聚合已在上面处理）与点击高亮层（它被置顶且 properties 为空，
+      // 会抢走 topPayload → 表现为「同一要素第二次点选提示无属性字段」）。
+      const usable = (f: MapGeoJSONFeature): boolean =>
+        f.properties?.cluster_id == null && !isSelectionLayerId(f.layer.id)
+      // 先精确命中（保持"取最上层"的常规语义）；落空再扩成一个方框重查。
+      // maplibre 的 queryRenderedFeatures(point) 是逐像素命中：1px 宽的线、半径 2px 的圆点
+      // 几乎点不上 —— 这不是用户手抖，是没有容差。
+      let hits = map.queryRenderedFeatures(e.point).filter(usable)
+      if (hits.length === 0) {
+        const t = PICK_TOLERANCE_PX
+        hits = map.queryRenderedFeatures([
+          [e.point.x - t, e.point.y - t],
+          [e.point.x + t, e.point.y + t],
+        ]).filter(usable)
+      }
+      for (const f of hits.slice(0, 30)) {
         const pl: FeaturePayload = {
           id: f.id ?? null,
           layer: f.layer.id,

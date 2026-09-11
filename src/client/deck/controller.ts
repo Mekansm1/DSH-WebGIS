@@ -41,6 +41,12 @@ export interface DeckControllerHost {
   onError?(msg: string, ...args: unknown[]): void
 }
 
+/**
+ * deck 拾取半径（像素）。deck 默认是精确命中（radius 0），大数据点层里半径几像素的圆点很难点中。
+ * 8px 与 maplibre 侧的 PICK_TOLERANCE_PX 保持一致 —— 两条渲染路径的手感不该有差别。
+ */
+const DECK_PICK_RADIUS_PX = 8
+
 /** deck overlay 点选命中信息（MapView 只消费这三个字段；缺 overlay/异常返回 null）。 */
 export interface DeckPickHit {
   picked: boolean
@@ -477,7 +483,7 @@ export class DeckController {
   pickObject(x: number, y: number): DeckPickHit | null {
     if (!this.overlay) return null
     try {
-      const hit = this.overlay.pickObject({ x, y, radius: 3 })
+      const hit = this.overlay.pickObject({ x, y, radius: DECK_PICK_RADIUS_PX })
       if (hit) return { picked: hit.picked, layer: hit.layer, index: hit.index }
       return null
     } catch (err) {
