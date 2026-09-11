@@ -22,7 +22,7 @@ import { formatArea, formatDistance, haversineM, pathMeters, polygonAreaM2, ring
 import { EMPTY_COLLECTION, applyBaseMap, baseStyle, fmtCoord, ensureDataLayers, ensureMeasureLayers, syncOverlays } from './map-style.js'
 import { useMapMeasure } from './use-map-measure.js'
 import { createLayerSync } from './layer-sync.js'
-import { SEL_SRC, ensureSelLayers, clearMapSelection, setMapSelection } from './map-highlight.js'
+import { SEL_SRC, ensureSelLayers, clearMapSelection, setMapSelection, isSelectionLayerId } from './map-highlight.js'
 import { isScalar, scalarRows, featureTitle, fmtCell, makeAttrTable, buildPopupContent } from './map-popup.js'
 import { queryFeatures, collectCoords, captureMapScreenshot, drawPin, fitToGeoJSON, clearPick, recordPick } from './map-pick.js'
 import type { ScreenshotPayload } from './map-pick.js'
@@ -431,6 +431,9 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       const payloads: FeaturePayload[] = []
       for (const f of map.queryRenderedFeatures(e.point).slice(0, 30)) {
         if (f.properties?.cluster_id != null) continue // 排除聚合圈自身（聚合已在上面处理）
+        // 排除点击高亮层自身：它被置顶，会抢走 topPayload，而它的 properties 是空的
+        // → 表现为「同一要素第二次点选提示无属性字段」。
+        if (isSelectionLayerId(f.layer.id)) continue
         const pl: FeaturePayload = {
           id: f.id ?? null,
           layer: f.layer.id,

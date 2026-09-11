@@ -51,6 +51,19 @@ const SEL_LAYERS: Array<{
   },
 ]
 
+/**
+ * 是否为「点击高亮自身」的图层。
+ *
+ * ⚠️ 高亮层是**参与渲染但不该被拾取**的：它们被主动置顶（否则会被数据层盖住），
+ * 而 `queryRenderedFeatures` 返回的第一条就是最上层 —— 于是上一次点击的高亮图形
+ * 会抢走下一次点击的 `topPayload`。它的 properties 是空的（只是个几何壳），
+ * 结果就是「同一个图斑点第二次显示无属性字段」。
+ * 所有拾取入口都要用它过滤。
+ */
+export function isSelectionLayerId(id: string | undefined): boolean {
+  return typeof id === 'string' && (id === SEL_SRC || id.startsWith(`${SEL_SRC}-`))
+}
+
 /** 确保高亮源/层存在（缺哪层补哪层），并把 paint 同步成当前配色（便于热更新/旧图层复用）。 */
 export function ensureSelLayers(map: MapLibreMap): void {
   if (!map.getSource(SEL_SRC)) map.addSource(SEL_SRC, { type: 'geojson', data: EMPTY_COLLECTION as never })

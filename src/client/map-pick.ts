@@ -5,11 +5,14 @@
 import type { Point, Map as MapLibreMap } from 'maplibre-gl'
 import type { FeatureCollection } from 'geojson'
 import { sessionUrl } from './sessionUrl.js'
+import { isSelectionLayerId } from './map-highlight.js'
 import type { FeaturePayload } from './gis-types.js'
 
-/** 提取地图上某像素点命中的要素（点击 / 图框中心捕获共用）。 */
+/** 提取地图上某像素点命中的要素（点击 / 图框中心捕获共用）。
+ *  跳过点击高亮层自身：它被置顶且 properties 为空，留着会污染命中结果。 */
 export function queryFeatures(map: MapLibreMap, point: Point): FeaturePayload[] {
   return map.queryRenderedFeatures(point)
+    .filter((f) => !isSelectionLayerId(f.layer.id))
     .slice(0, 30)
     .map((f) => ({
       id: f.id ?? null,
