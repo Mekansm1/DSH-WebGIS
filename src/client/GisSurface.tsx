@@ -51,6 +51,8 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
   const prevCurrent = useRef<typeof current>(current)
   const gisRef = useRef<HTMLDivElement>(null)
   const lastLeft = useRef<number | null>(null)
+  /** 上次实测的宿主右侧栏轨道宽度（px），用于避免无谓的 DOM 写入。 */
+  const lastRightbar = useRef<number | null>(null)
   /** 当前对话列宽度（拖动时实时更新；视口变化时重新钳制）。 */
   const chatWidthRef = useRef(CHAT_W_DEFAULT)
 
@@ -102,6 +104,7 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
       delete root.dataset.webgisGis
       if (el) el.style.left = ''
       root.style.removeProperty('--webgis-sidebar-width')
+      root.style.removeProperty('--webgis-rightbar-width')
       return
     }
     root.dataset.webgisGis = ''
@@ -118,13 +121,19 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
       }
       return null
     }
-    /** 网格第一列宽度（宿主为侧栏保留的列宽），兼容 "280px" 与 "minmax(0px, 952px)"。 */
-    const gridColumnWidth = (): number => {
+    /** 宿主 frame（.frame 网格容器）：overlay 层是它的绝对定位子元素，网格轨道写在它身上。 */
+    const frameEl = (): Element | null => {
       const ov = document.querySelector('[data-shell-overlay]')
-      const frame = ov ? ov.parentElement : null
+      return ov ? ov.parentElement : null
+    }
+    /** 网格第 idx 列的宽度（0=左；-1=右），兼容 "280px" 与 "minmax(0px, 952px)"。
+        宿主把轨道写成 inline gridTemplateColumns `${sidebar}px minmax(0,1fr) ${rightbar}px`。 */
+    const gridTrackWidth = (idx: number): number => {
+      const frame = frameEl()
       if (!frame) return 0
-      const first = (getComputedStyle(frame).gridTemplateColumns.split(/\s+/)[0] ?? '').trim()
-      const nums = first.match(/\d+(?:\.\d+)?/g)
+      const tracks = getComputedStyle(frame).gridTemplateColumns.split(/\s+/).filter(Boolean)
+      const cell = (idx < 0 ? tracks[tracks.length + idx] : tracks[idx]) ?? ''
+      const nums = cell.match(/\d+(?:\.\d+)?/g)
       if (!nums || nums.length === 0) return 0
       const px = Math.max(...nums.map(Number))
       return Number.isFinite(px) && px > 0 ? Math.round(px) : 0
@@ -147,7 +156,7 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
         // sb 存在但无可见盒子 = 已折叠（或内容为空）→ left 保持 0，地图延伸到最左
       } else {
         // 找不到侧栏槽 → 用网格列宽兜底
-        left = gridColumnWidth()
+        left = gridTrackWidth(0)
       }
       const prev = lastLeft.current
       if (prev !== left) {
@@ -156,12 +165,20 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
         root.style.setProperty('--webgis-sidebar-width', `${left}px`)
         console.info(`[webgis] GIS 地图层 left=${left}px`)
       }
+
+      // 右侧：宿主右侧栏占的网格轨道宽（≤0.1.2 是 details，0.1.5+ 是 rightbar）。
+      // 轨道是 0（关闭）时地图铺到中列右缘；展开时地图让开，正好贴住被推左的对话列。
+      // 右侧栏全屏不用管：它是 position:fixed + z-index:40，天然盖在 overlay 层（z-index:20）之上。
+      const rightbar = gridTrackWidth(-1)
+      if (lastRightbar.current !== rightbar) {
+        lastRightbar.current = rightbar
+        root.style.setProperty('--webgis-rightbar-width', `${rightbar}px`)
+      }
     }
     measure()
     window.addEventListener('resize', measure)
     const observers: ResizeObserver[] = []
-    const ov = document.querySelector('[data-shell-overlay]')
-    const frame = ov ? ov.parentElement : null
+    const frame = frameEl()
     if (typeof ResizeObserver !== 'undefined') {
       // 折叠/展开可能只改侧栏内容尺寸不改网格 → 同时观察侧栏可见盒与 .frame。
       if (frame) {
@@ -178,15 +195,34 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
           observers.push(ro2)
         }
       }
+      const rb = document.querySelector('[data-rightbar-col]')
+      if (rb && rb !== frame) {
+        const ro3 = new ResizeObserver(measure)
+        ro3.observe(rb)
+        observers.push(ro3)
+      }
+    }
+    // 网格轨道的开合只改 frame 的 inline gridTemplateColumns：frame 自己的盒子尺寸没变，
+    // ResizeObserver 不会触发（它观察的是盒子，不是轨道），必须靠属性观察补上。
+    let attrObserver: MutationObserver | undefined
+    if (frame && typeof MutationObserver !== 'undefined') {
+      attrObserver = new MutationObserver(measure)
+      attrObserver.observe(frame, {
+        attributes: true,
+        attributeFilter: ['style', 'data-rightbar-collapsed', 'data-sidebar-collapsed'],
+      })
     }
     return () => {
       delete root.dataset.webgisGis
       if (el) el.style.left = ''
       root.style.removeProperty('--webgis-sidebar-width')
+      root.style.removeProperty('--webgis-rightbar-width')
       root.style.removeProperty(CHAT_W_VAR)
       window.removeEventListener('resize', measure)
       observers.forEach((o) => o.disconnect())
+      attrObserver?.disconnect()
       lastLeft.current = null
+      lastRightbar.current = null
     }
   }, [mode, pluginEnabled])
 

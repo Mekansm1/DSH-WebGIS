@@ -1322,22 +1322,34 @@
 
 /* 1. 地图层只占左侧：overlay 槽是 display:contents（无盒），实际盒是它的直接子元素。
       left 从左侧会话列表之后开始（宽度由 GisSurface 实测写入 --webgis-sidebar-width），
-      否则地图 canvas 会延伸到被会话列表盖住的区域——截图多出隐藏部分、图框中心整体偏移。 */
+      right 从右侧让开「对话列 + 右栏（右侧栏）」两段，均由 GisSurface 实测写入。
+      否则地图 canvas 会延伸到被盖住的区域——截图多出隐藏部分、图框中心整体偏移。 */
 :global(html[data-webgis-gis]) [data-slot="shell.overlay"] > * {
   position: absolute;
   left: var(--webgis-sidebar-width, 0px);
   top: 0;
   bottom: 0;
   /* 对话列宽度由 --webgis-chat-width 统一控制（GisSurface 拖动分隔条写入并持久化；
-     缺省 360px）。地图与对话列引用同一变量，避免两处硬编码漂移。 */
-  right: var(--webgis-chat-width, 360px);
+     缺省 360px）。地图与对话列引用同一变量，避免两处硬编码漂移。
+     --webgis-rightbar-width：宿主右侧栏（0.1.5+ 的 rightbar 网格轨道，折叠时为 0）。 */
+  right: calc(var(--webgis-chat-width, 360px) + var(--webgis-rightbar-width, 0px));
 }
 
-/* 2. 对话列：右侧 440px 嵌入面板（conversation 槽也是 display:contents，实际盒是 [data-phase]） */
-:global(html[data-webgis-gis]) [data-slot="conversation"] > [data-phase] {
+/* （右侧栏全屏无需特殊处理：面板是 position:fixed; inset:0; z-index:40，
+     高于 overlay 层的 z-index:20，天然盖住地图。） */
+
+/* 2. 对话列：右侧嵌入面板。conversation 槽是 display:contents（无盒），实际盒是它的
+     直接子元素 [data-phase]（ConversationRoot）。
+     ⚠️ 槽名随宿主版本变过：≤0.1.2 是 [data-slot="conversation"]，0.1.5+ 把会话并入
+     'main' 槽并以 key 'conversation' 注册，锚点成了 [data-slot="main.conversation"]。
+     两个都写，兼容两代宿主。 */
+:global(html[data-webgis-gis]) [data-slot="conversation"] > [data-phase],
+:global(html[data-webgis-gis]) [data-slot="main.conversation"] > [data-phase] {
   width: var(--webgis-chat-width, 360px);
   flex: 0 0 auto;
   min-height: 0;
+  /* centerCol 是 column flex：align-self:flex-end 即把会话推到中列右缘。
+     右侧栏展开时中列自动变窄，会话跟着左移，与地图的 right 偏移保持贴合。 */
   align-self: flex-end;
   background: var(--dsw-alias-bg-base, #1a2334);
   border-left: 1px solid var(--dsw-alias-border-l1, #2d3a4f);
@@ -1349,7 +1361,9 @@
   z-index: 30;
 }
 
-/* 4. GIS 模式隐藏右侧详情栏 */
+/* 4. GIS 模式隐藏右侧详情栏（仅 ≤0.1.2 的旧宿主有 details 槽）。
+     0.1.5+ 的 rightbar 是有标签页的右侧栏（用户主动展开的文件预览等），**不隐藏**——
+     改为让地图让出轨道宽度（见规则 1 的 --webgis-rightbar-width）。 */
 :global(html[data-webgis-gis]) [data-slot="details"] > * {
   display: none;
 }
