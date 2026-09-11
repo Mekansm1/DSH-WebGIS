@@ -59,10 +59,10 @@ export const handleServicesVisibility: RouteHandler = (req, res, _url, _pathname
   })()
 }
 
-export const handleStaticAsset: RouteHandler = async (_req, res, _url, pathname, _sessionId, _state) => {
+export const handleStaticAsset: RouteHandler = async (req, res, _url, pathname, _sessionId, _state) => {
   // 白名单静态资源：文件名固定，路径剥离防穿越（earcut-worker.js → earcut-worker.min.js 实际文件）
   const file = pathname.split('/').pop()!
-  await serveAsset(res, file === 'earcut-worker.js' ? 'earcut-worker.min.js' : file)
+  await serveAsset(req, res, file === 'earcut-worker.js' ? 'earcut-worker.min.js' : file)
 }
 
 export const handleEvents: RouteHandler = (req, res, _url, _pathname, sessionId, _state, api) => {

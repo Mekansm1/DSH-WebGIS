@@ -2,7 +2,7 @@
  * /webgis/* HTTP 层工具：JSON 响应、请求体读取、附件下载、浏览器信任围栏与静态资源白名单。
  * 拆分自 src/index.ts（原模块级函数与请求体上限常量）。
  */
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 export function json(res: import('node:http').ServerResponse, body: unknown): void {
@@ -122,8 +122,18 @@ export function isTrustedLocalRequest(req: import('node:http').IncomingMessage):
   }
 }
 
-/** 白名单静态资源服务（文件名固定；earcut-worker.js → earcut-worker.min.js 实际文件）。 */
-export async function serveAsset(res: import('node:http').ServerResponse, file: string): Promise<void> {
+/**
+ * 白名单静态资源服务（文件名固定；earcut-worker.js → earcut-worker.min.js 实际文件）。
+ *
+ * ⚠️ 缓存策略：chunk 的 URL 固定（`/webgis/assets/gis.js`，没有版本号或 hash），所以**不能**用
+ * `max-age` 直接长缓存 —— 重新构建后浏览器会继续跑旧 chunk 最长一小时，表现为「代码改了但没生效」。
+ * 这里用 `no-cache` + ETag：每次都向 host 校验（内容没变就是一次廉价的 304），构建一变立刻生效。
+ */
+export async function serveAsset(
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+  file: string,
+): Promise<void> {
   if (file !== 'maplibre-gl.css' && file !== 'maplibre-gl-csp-worker.js' && file !== 'earcut-worker.min.js'
     && file !== 'gis.js' && file !== 'deck.js' && file !== 'draw.js' && file !== 'export.js') {
     return notFound(res, 'forbidden asset')
@@ -132,7 +142,14 @@ export async function serveAsset(res: import('node:http').ServerResponse, file: 
   try {
     const body = await readFile(path)
     const type = file.endsWith('.css') ? 'text/css; charset=utf-8' : 'application/javascript; charset=utf-8'
-    res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=3600' })
+    // ETag 用内容长度 + 修改时间：构建一次变一次，够用且不用算哈希
+    const { mtimeMs } = await stat(path)
+    const etag = `W/"${body.byteLength}-${Math.round(mtimeMs)}"`
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { etag, 'cache-control': 'no-cache' })
+      return void res.end()
+    }
+    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache', etag })
     res.end(body)
   } catch {
     notFound(res, 'asset not found')
