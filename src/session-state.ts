@@ -119,6 +119,8 @@ export interface BasemapExportResult {
   rawCount: number
   dedupedCount: number
   usedLayers: string[]
+  /** 当前缩放级别下不存在的图层（用于提示用户放大后会更多）。 */
+  missingLayers: string[]
   names: string[]
   classes: Record<string, number>
   note?: string

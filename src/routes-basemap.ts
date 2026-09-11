@@ -16,7 +16,7 @@ export const handleBasemapExtract: RouteHandler = (req, res, _url, _pathname, _s
       const data = JSON.parse(raw) as {
         seq?: unknown; ok?: unknown; message?: unknown
         groups?: unknown; source?: unknown; rawCount?: unknown; note?: unknown
-        dedupedCount?: unknown; usedLayers?: unknown; names?: unknown; classes?: unknown
+        dedupedCount?: unknown; usedLayers?: unknown; missingLayers?: unknown; names?: unknown; classes?: unknown
       }
       const seq = Number(data.seq)
       if (!Number.isInteger(seq) || seq <= 0) return void jsonError(res, 400, 'seq 参数非法')
@@ -54,6 +54,7 @@ export const handleBasemapExtract: RouteHandler = (req, res, _url, _pathname, _s
         rawCount: Number.isFinite(Number(data.rawCount)) ? Number(data.rawCount) : 0,
         dedupedCount: Number.isFinite(Number(data.dedupedCount)) ? Number(data.dedupedCount) : 0,
         usedLayers: Array.isArray(data.usedLayers) ? (data.usedLayers as unknown[]).filter((s): s is string => typeof s === 'string') : [],
+        missingLayers: Array.isArray(data.missingLayers) ? (data.missingLayers as unknown[]).filter((s): s is string => typeof s === 'string') : [],
         names: Array.isArray(data.names) ? (data.names as unknown[]).filter((n): n is string => typeof n === 'string') : [],
         classes: (data.classes && typeof data.classes === 'object' ? data.classes : {}) as Record<string, number>,
         ...(typeof data.note === 'string' && data.note ? { note: data.note } : {}),

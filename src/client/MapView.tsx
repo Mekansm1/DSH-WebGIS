@@ -128,7 +128,8 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       payload = res.ok
         ? {
             seq: req.seq, ok: true, groups: res.outputs, source: res.source,
-            rawCount: res.rawCount, dedupedCount: res.dedupedCount, usedLayers: res.usedLayers,
+            rawCount: res.rawCount, dedupedCount: res.dedupedCount,
+            usedLayers: res.usedLayers, missingLayers: res.missingLayers,
             names: res.names, classes: res.classes, note: res.note,
           }
         : { seq: req.seq, ok: false, message: res.message }

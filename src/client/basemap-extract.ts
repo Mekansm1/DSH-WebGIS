@@ -55,6 +55,8 @@ export type ExtractResult =
       dedupedCount: number
       /** 实际取到的底图图层名。 */
       usedLayers: string[]
+      /** 想要但在当前缩放级别不存在（或被瓦片裁剪掉）的图层 —— 用来提示用户"放大后会更多"。 */
+      missingLayers: string[]
       /** 命中的名字清单（去重、最多 40 个）。 */
       names: string[]
       /** 类目分布。 */
@@ -274,6 +276,7 @@ export function extractBasemapFeatures(map: MapLibreMap, rawOpts?: ExtractOption
     })
   }
 
+  const missingLayers = opts.sourceLayer ? [] : wanted.filter((n) => !usedLayers.includes(n))
   const biggest = outputs.reduce((a, o) => Math.max(a, o.featureCount), 0)
   return {
     ok: true,
@@ -282,6 +285,7 @@ export function extractBasemapFeatures(map: MapLibreMap, rawOpts?: ExtractOption
     rawCount,
     dedupedCount: filtered.length,
     usedLayers,
+    missingLayers,
     names,
     classes,
     ...(biggest > 20000

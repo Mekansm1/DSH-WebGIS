@@ -34,7 +34,10 @@ export function registerBasemapTools(ctx: Context, rt: GeoToolRuntime): void {
       + '⚠️ 前提：当前底图必须是**矢量底图**（OpenFreeMap Liberty / Carto Positron / Carto Voyager / Carto Dark）；'
       + '光栅底图（默认的 Carto 浅色、Esri 影像）没有矢量数据可提取。'
       + '⚠️ 范围仅限**当前视野**（所见即所得），不用于批量导出大范围数据 —— 那请让用户用 Geofabrik/Overpass 取数据后走 webgis_load_dataset 导入。'
-      + '⚠️ 道路图层（transportation）**不带路名**，按名字筛路无效；想要带路名的路请点名 transportation_name，或按 classes 筛等级。',
+      + '⚠️ 道路图层（transportation）**不带路名**，按名字筛路无效；想要带路名的路请点名 transportation_name，或按 classes 筛等级。'
+      + '⚠️ **底图瓦片按缩放级别裁剪**：级别越低图层越少（省级只有水系/主要道路/保护区/地名；'
+      + 'POI、建筑、门牌号要放大到城市/街区级才有）。所以视野很广时点要素会很少，'
+      + '这不是漏导 —— 结果里会提示哪些图层在该级别不存在，请把这点转告用户并建议放大后再导出。',
     parameters: {
       layer: { type: 'string', description: '要导出的底图图层（用户说法或图层名，如 河流 / waterway / 道路）。**用户没指定具体类别时省略** → 导出全部并分成点/线/面三个图层' },
       name: { type: 'string', description: '只导出名字包含该串的要素（如 白浪河）。河流/公园/POI 支持；道路不支持' },
@@ -97,13 +100,20 @@ export function registerBasemapTools(ctx: Context, rt: GeoToolRuntime): void {
           : ''
         const head = spec
           ? `从底图图层「${spec.sourceLayer}」按当前视野导出：`
-          : `按当前视野导出底图全部内容图层（${r.usedLayers.join('、')}），按几何分成 ${r.groups.length} 个图层：`
+          : `按当前视野导出底图全部内容图层（取到 ${r.usedLayers.join('、')}），按几何分成 ${r.groups.length} 个图层：`
+        // 底图瓦片按缩放级别裁剪：级别低时 POI / 建筑 等图层根本不存在。
+        // 这会让"点"图层出奇地少 —— 不说明的话用户会以为是漏导了。
+        const missing = r.missingLayers.filter((n) => ['poi', 'building', 'housenumber', 'aeroway'].includes(n))
+        const zoomHint = !spec && missing.length
+          ? `\nℹ 当前缩放级别较低，底图瓦片在该级别不含这些图层：${missing.join('、')}。`
+            + '放大到城市/街区级别再导出，点要素会多很多。'
+          : ''
         return {
           ...first.out,
           message: `${head}原始 ${r.rawCount} 个 → 去重 ${r.dedupedCount} 个 → ${total} 个要素${merged}。`
             + `\n生成图层：${outs.map((o) => `${o.out.layerId}（${KIND_LABEL[o.kind]} ${o.out.featureCount}）`).join('、')}`
             + (spec ? `（${segments}）` : '')
-            + `${names}${cls}${r.note ? `\n⚠ ${r.note}` : ''}`
+            + `${names}${cls}${zoomHint}${r.note ? `\n⚠ ${r.note}` : ''}`
             + '\n这是当前视野的底图数据副本，可直接用 webgis_layer_info / 统计工具 / 缓冲等继续分析。'
             + `${REMINDER}`,
         }

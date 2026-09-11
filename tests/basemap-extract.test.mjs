@@ -141,23 +141,31 @@ test('geometryKind: 几何类型归到点/线/面三族，未知返回 null', ()
   assert.equal(geometryKind(undefined), null)
 })
 
-test('defaultExportLayerNames: 含全部内容图层，排除标注图层（那是渲染用的文字，不是地物）', () => {
+test('defaultExportLayerNames: 含全部内容图层 + 地名/山峰/机场等点位图层', () => {
   const names = defaultExportLayerNames()
   for (const want of ['waterway', 'water', 'transportation', 'building', 'park', 'landuse', 'landcover', 'boundary', 'poi', 'aeroway']) {
     assert.ok(names.includes(want), `默认导出应包含 ${want}`)
   }
-  for (const skip of ['transportation_name', 'water_name', 'place', 'housenumber']) {
-    assert.ok(!names.includes(skip), `默认导出不应包含标注图层 ${skip}`)
+  // 地名(place)/山峰/机场名是独立的点位数据，不是"渲染文字" —— 低缩放级别下它们往往是仅有的点来源
+  for (const want of ['place', 'mountain_peak', 'aerodrome_label', 'water_name', 'housenumber']) {
+    assert.ok(names.includes(want), `默认导出应包含 ${want}`)
   }
 })
 
-test('目录: 标注图层被标记 label，且清单里单独列出（模型能看出它们是点名才取的）', () => {
-  const labels = BASEMAP_LAYERS.filter((s) => s.label)
-  assert.ok(labels.length >= 3)
-  for (const l of labels) assert.ok(!defaultExportLayerNames().includes(l.sourceLayer))
+test('defaultExportLayerNames: 只排除几何重复的图层（否则线要素会翻倍）', () => {
+  const names = defaultExportLayerNames()
+  // transportation_name 的几何与 transportation 完全重复，只是多带路名
+  assert.ok(!names.includes('transportation_name'))
+  const skipped = BASEMAP_LAYERS.filter((s) => s.skipDefault)
+  assert.deepEqual(skipped.map((s) => s.sourceLayer), ['transportation_name'])
+  assert.match(skipped[0].skipDefault, /重复/)
+})
+
+test('目录: 清单里说明哪些图层默认不含以及为什么', () => {
   const catalog = basemapLayerCatalog()
-  assert.match(catalog, /标注图层（默认导出不含，点名才取）/)
+  assert.match(catalog, /默认导出不含（几何与上面的图层重复，点名才取）/)
   assert.match(catalog, /transportation_name/)
+  assert.match(catalog, /place（地名）/)
 })
 
 test('groupFeaturesByName: 归组键含图层名 —— 同名公园面与 POI 点不会被并成一个要素', () => {

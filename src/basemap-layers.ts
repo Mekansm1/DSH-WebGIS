@@ -23,10 +23,13 @@ export interface BasemapLayerSpec {
   /** 该图层是否带 name 属性（决定能否按名字筛选）。 */
   hasName: boolean
   /**
-   * 标注图层（路名/地名/门牌号/山峰名）：这些是**渲染用的文字**，不是地物。
-   * 默认"导出全部"时跳过；显式点名时仍可取（例如想要带路名的道路）。
+   * 有值则在默认"导出全部"时跳过，值是原因。
+   *
+   * 只用于**几何与其他图层重复**的图层 —— 跳过的唯一理由是避免同一段几何出现在结果里两次，
+   * 不是"它不重要"。地名(place)、山峰、机场这些尽管长得像标注，但都是**独立的点位数据**，
+   * 默认导出包含它们（低缩放级别下它们往往是仅有的点要素来源）。
    */
-  label?: boolean
+  skipDefault?: string
   note?: string
 }
 
@@ -109,37 +112,58 @@ export const BASEMAP_LAYERS: BasemapLayerSpec[] = [
     geometry: 'line',
     hasName: false,
   },
-  // ---- 标注图层：默认"导出全部"跳过；显式点名可取（如"带路名的道路"→ transportation_name） ----
+  {
+    sourceLayer: 'mountain_peak',
+    name: '山峰',
+    aliases: ['山峰', '山', '高程点', 'mountain_peak', 'peak'],
+    geometry: 'point',
+    hasName: true,
+  },
+  {
+    sourceLayer: 'aerodrome_label',
+    name: '机场名',
+    aliases: ['机场名', '机场标注', 'aerodrome_label'],
+    geometry: 'point',
+    hasName: true,
+  },
   {
     sourceLayer: 'transportation_name',
-    name: '道路名称（标注）',
+    name: '道路名称',
     aliases: ['路名', '道路名称', 'streetname', 'transportation_name'],
     geometry: 'line',
     hasName: true,
-    label: true,
-    note: '带路名的道路**线段**（只有渲染器在当前级别标注出来的那些）。想要"带名字的路"点名用它',
+    skipDefault: '与 transportation 的线几何完全重复（它只是把路名叠在同样的线上），'
+      + '一起导出会让线要素翻倍、长度翻倍；想要"带名字的路"就单独点名它',
+    note: '带路名的道路**线段**（只有渲染器在当前级别标注出来的那些）',
   },
   {
     sourceLayer: 'water_name',
-    name: '水域名称（标注）',
+    name: '水域名称',
     aliases: ['河名', '湖名', '水域名称', 'water_name'],
     geometry: 'point',
     hasName: true,
-    label: true,
   },
   {
     sourceLayer: 'place',
-    name: '地名（标注）',
-    aliases: ['地名', '城市名', '行政区名', 'place'],
+    name: '地名',
+    aliases: ['地名', '城市名', '行政区名', '村镇名', 'place'],
     geometry: 'point',
     hasName: true,
-    label: true,
+    note: '城市/区县/乡镇/村落的点位（带 name 与 rank）。低缩放级别下往往是仅有的点数据来源',
+  },
+  {
+    sourceLayer: 'housenumber',
+    name: '门牌号',
+    aliases: ['门牌号', '门牌', 'housenumber'],
+    geometry: 'point',
+    hasName: false,
+    note: '只在很大缩放级别出现，数量极大',
   },
 ]
 
-/** 默认导出遍历的图层名（排除标注图层）。 */
+/** 默认导出遍历的图层名（排除几何重复的图层）。 */
 export function defaultExportLayerNames(): string[] {
-  return BASEMAP_LAYERS.filter((s) => !s.label).map((s) => s.sourceLayer)
+  return BASEMAP_LAYERS.filter((s) => !s.skipDefault).map((s) => s.sourceLayer)
 }
 
 /** 归一化：小写、去空格与常见分隔符。 */
@@ -170,9 +194,9 @@ export function resolveBasemapLayer(query: string): BasemapLayerSpec | null {
   return best?.spec ?? null
 }
 
-/** 目录清单（写进工具描述/错误提示里）；标注图层单独列，让模型知道它们不在默认导出里。 */
+/** 目录清单（写进工具描述/错误提示里）；几何重复的图层单独列，说明为什么默认导出不含它。 */
 export function basemapLayerCatalog(): string {
-  const content = BASEMAP_LAYERS.filter((s) => !s.label).map((s) => `${s.sourceLayer}（${s.name}）`)
-  const labels = BASEMAP_LAYERS.filter((s) => s.label).map((s) => `${s.sourceLayer}（${s.name}）`)
-  return `${content.join('、')}；标注图层（默认导出不含，点名才取）：${labels.join('、')}`
+  const content = BASEMAP_LAYERS.filter((s) => !s.skipDefault).map((s) => `${s.sourceLayer}（${s.name}）`)
+  const skipped = BASEMAP_LAYERS.filter((s) => s.skipDefault).map((s) => `${s.sourceLayer}（${s.name}）`)
+  return `${content.join('、')}；默认导出不含（几何与上面的图层重复，点名才取）：${skipped.join('、')}`
 }
