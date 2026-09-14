@@ -60,7 +60,7 @@ test('registerGeoTools：经 inject 注册全局工具纪律系统提示段（#6
   assert.ok(defs.length >= 35)
 })
 
-test('全部 43 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统计 + 4 指数 + 1 底图 + 3 展示方式/改色 + 3 属性编辑）', () => {
+test('全部 44 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统计 + 4 指数 + 1 底图 + 4 展示方式/改色/专题 + 3 属性编辑）', () => {
   const { defs } = setup()
   const names = defs.map((d) => d.name).sort()
   const expected = [
@@ -70,7 +70,7 @@ test('全部 43 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统�
     'webgis_feature_summary', 'webgis_getis_ord', 'webgis_gini', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
     'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
     'webgis_reproject', 'webgis_select_by_location', 'webgis_select_by_value',
-    'webgis_set_attribute', 'webgis_set_heatmap_mode', 'webgis_set_layer_color', 'webgis_set_layer_style',
+    'webgis_set_attribute', 'webgis_set_heatmap_mode', 'webgis_set_layer_color', 'webgis_set_layer_style', 'webgis_set_layer_thematic',
     'webgis_set_layer_visibility',
     'webgis_set_render_mode',
     'webgis_shannon', 'webgis_simplify', 'webgis_smooth',

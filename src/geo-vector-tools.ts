@@ -65,6 +65,9 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const ferr = requireFeatures(layer)
       if (ferr) return Promise.resolve({ ok: false, message: ferr })
+      // 大图层的 geojson 只是上图抽样：重投影出来的新层会只有抽样那几个要素，看着却像"整层已重投影"。
+      const merr = requireMaterialized(layer, '重投影')
+      if (merr) return Promise.resolve({ ok: false, message: merr })
       const to = args.to === 'wgs84' ? 'wgs84' : 'mercator'
       return Promise.resolve(pushResult('重投影', opReproject(layer, to), layer.name))
     },
@@ -142,6 +145,11 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       if (typeof join === 'string') return Promise.resolve({ ok: false, message: join })
       const targetField = typeof args.targetField === 'string' ? args.targetField : ''
       if (!targetField) return Promise.resolve({ ok: false, message: 'targetField 不能为空' })
+      // 大图层的 geojson 只是上图抽样：属性连接会在抽样上做，结果静默不完整。
+      for (const [l, label] of [[target, 'target'], [join, 'joinLayer']] as const) {
+        const merr = requireMaterialized(l, `属性连接（${label}）`)
+        if (merr) return Promise.resolve({ ok: false, message: merr })
+      }
       const joinField = typeof args.joinField === 'string' ? args.joinField : undefined
       try {
         return Promise.resolve(pushResult('属性连接', opAttributeJoin(target, join, targetField, joinField), `${target.name} ← ${join.name}`))
@@ -153,7 +161,10 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_select_by_location',
-    description: COMMON + '按位置筛选要素：保留与 overlay 图层（任一要素满足）或 bbox 满足空间关系的要素。relation：contains（含）/within（在内）/intersects（相交）。overlay 与 bbox 二选一。',
+    description: COMMON + '【按位置筛选·普通图层】保留与 overlay 图层（任一要素满足）或 bbox 满足空间关系的要素。relation：contains（含）/within（在内）/intersects（相交）。overlay 与 bbox 二选一。'
+      + '⚠ 适用范围：**已全量物化的图层**（webgis_list_layers 里 materialized=true）；materialized=false 的大图层在显示抽样上算会失真，'
+      + '本工具会直接拒绝——要按全表筛围栏/半径请用 webgis_spatial_filter。'
+      + '按**属性值**筛选请用 webgis_select_by_value（本工具只管空间关系）。',
     parameters: {
       layer: LAYER_PARAM,
       relation: { type: 'string', enum: ['contains', 'within', 'intersects'], description: '空间关系（默认 intersects）' },

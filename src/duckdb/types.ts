@@ -6,21 +6,6 @@
 export interface DuckDbRow {
   [column: string]: unknown
 }
-export interface DuckDbConn {
-  all(sql: string, cb: (err: Error | null, rows: DuckDbRow[]) => void): void
-  all(sql: string, params: unknown[], cb: (err: Error | null, rows: DuckDbRow[]) => void): void
-  exec(sql: string, cb: (err: Error | null) => void): void
-  /** DuckDB 原生 Arrow IPC 导出（需 LOAD arrow FROM community；见 ensureArrow）。 */
-  arrowIPCAll?(sql: string, cb: (err: Error | null, buffers: Uint8Array[] | undefined) => void): void
-  close(cb: (err: Error | null) => void): void
-}
-export interface DuckDbHandle {
-  connect(): DuckDbConn
-  close(cb: (err: Error | null) => void): void
-}
-export interface DuckDbCtor {
-  Database: new (path: string) => DuckDbHandle
-}
 export interface DuckDbOptions {
   /** 小文件「常规加载」行数阈值：count ≤ 此值的 CSV 不保留内存表，全部物化上图。默认 50000。 */
   papaparseThreshold?: number

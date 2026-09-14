@@ -2,8 +2,9 @@
  * DuckDB host 引擎（:memory: 懒建 + 连接/建表/查询/Arrow IPC/抽样）。
  * 拆分自 src/duckdb.ts；类型见 ./types.js、几何与行转换见 ./geometry.js。
  */
-import type { DuckColumn, DuckDbConn, DuckDbCtor, DuckDbHandle, DuckDbOptions, DuckDbRow, VectorTableInfo } from './types.js'
-import { DUCK_RID, detectGeomColumn, detectGeomFormat, quoteIdent } from './geometry.js'
+import type { DuckColumn, DuckDbOptions, DuckDbRow, VectorTableInfo } from './types.js'
+import { DUCK_RID, detectGeomColumn, detectGeomFormat, quoteIdent, type SourceCrsInfo } from './geometry.js'
+import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api'
 
 /**
  * DuckDB host 引擎：本地 CSV 的秒级加载 / 筛选 / 列式分析（方案见 D:\dsh webgis\DuckDB实现方案.md）。
@@ -13,42 +14,10 @@ import { DUCK_RID, detectGeomColumn, detectGeomFormat, quoteIdent } from './geom
  * - 单条查询 Promise.race 兜底超时，防乱写 SQL 卡死宿主。
  * - LRU 总行数清理：超出 maxTotalRows 自动 DROP 最久未用的表。
  */
-import { createRequire } from 'node:module'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Feature, FeatureCollection } from 'geojson'
-
-const require = createRequire(import.meta.url)
-// duckdb npm 包导出带 .Database 属性的构造函数（CJS）。用结构类型最小化依赖其 .d.ts 形状。
-
-/**
- * duckdb 原生绑定缺失时的给 AI/用户的排障指引：pnpm(>=10) 默认拦截依赖 build 脚本，
- * duckdb.node 不会随插件自动生成；这几步放行并重建后无需重启即可重试（本进程不缓存失败）。
- */
-const DUCKDB_SETUP_HINT =
-  'duckdb 原生绑定未就绪。请在 DSH profile 目录（Windows 形如 C:\\Users\\<用户名>\\.dsh\\profiles\\web）执行：\n'
-  + '  1) pnpm approve-builds   （勾选/确认 duckdb）\n'
-  + '  2) pnpm rebuild duckdb\n'
-  + '  3) pnpm install\n'
-  + '若 pnpm rebuild 无效：进入 node_modules\\duckdb 目录执行 npm run install（需能访问 npm.duckdb.org）。完成后重试即可。'
-
-/** 惰性加载 duckdb：只在首次真正建引擎时才 require 原生模块（缺 binding 不阻断插件启动）。 */
-let duckCtorCache: DuckDbCtor | null = null
-function loadDuckdb(): DuckDbCtor {
-  if (duckCtorCache) return duckCtorCache
-  try {
-    duckCtorCache = require('duckdb') as DuckDbCtor
-    return duckCtorCache
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    if (/duckdb\.node|Cannot find module|binding/i.test(msg)) {
-      throw new Error(`${msg}。${DUCKDB_SETUP_HINT}`)
-    }
-    throw err instanceof Error ? err : new Error(String(err))
-  }
-}
-
 
 interface TableRef {
   rows: number
@@ -61,15 +30,16 @@ interface TableRef {
 const INGEST_TIMEOUT_MS = 300_000
 
 export class DuckDbEngine {
-  private db: DuckDbHandle | null = null
-  private conn: DuckDbConn | null = null
+  private db: DuckDBInstance | null = null
+  private conn: DuckDBConnection | null = null
+  private initPromise: Promise<void> | null = null
   private readonly tables = new Map<string, TableRef>()
   private seq = 0
   private ingestSeq = 0
   private readonly opts: Required<DuckDbOptions>
   private spatialLoaded = false
   private spatialTried = false
-  /** arrow 扩展（community 仓）：惰性加载；arrowIpc 失败回退调用方（JS 行路径）。 */
+  /** Node Neo 尚未提供 Arrow IPC 导出；调用方会回退到 JS 行路径。 */
   private arrowLoaded = false
   private arrowTried = false
 
@@ -92,17 +62,28 @@ export class DuckDbEngine {
     return this.spatialLoaded
   }
 
-  private init(): void {
+  private async init(): Promise<void> {
     if (this.conn) return
-    this.db = new (loadDuckdb().Database)(':memory:')
-    this.conn = this.db.connect()
+    if (this.initPromise) return this.initPromise
+    this.initPromise = this.createConnection()
+    try {
+      await this.initPromise
+    } catch (err) {
+      this.initPromise = null
+      throw err
+    }
+  }
+
+  private async createConnection(): Promise<void> {
+    this.db = await DuckDBInstance.create(':memory:')
+    this.conn = await this.db.connect()
     // 可写 temp 目录：DuckDB 超出 memory_limit 需要 spill 落盘时，默认写到进程 CWD——宿主 CWD 常不可写，
     // 大表建表（如 168 万×22 列 union）会报「无法创建 .tmp」。显式指到 OS temp 并确保目录存在。
     const tmpDir = join(tmpdir(), 'dsh-webgis-duckdb').replace(/\\/g, '/')
     try { mkdirSync(tmpDir, { recursive: true }) } catch { /* 失败则交给 DuckDB 默认行为 */ }
-    void this.exec(`SET temp_directory='${tmpDir}'`).catch(() => {})
+    try { await this.conn.run(`SET temp_directory='${tmpDir}'`) } catch { /* 使用 DuckDB 默认目录 */ }
     // 内存兜底防 OOM；失败不影响后续（继续尝试真实查询）。
-    void this.exec(`SET memory_limit='${this.opts.memoryLimit.replace(/'/g, '')}'`).catch(() => {})
+    try { await this.conn.run(`SET memory_limit='${this.opts.memoryLimit.replace(/'/g, '')}'`) } catch { /* 使用 DuckDB 默认限制 */ }
   }
 
   /**
@@ -123,69 +104,27 @@ export class DuckDbEngine {
     }
   }
 
-  /** arrow 扩展是否已加载（原生 Arrow IPC 导出可用）。 */
+  /** Arrow IPC 导出是否可用。Node Neo 当前尚未提供该 API。 */
   get hasArrow(): boolean {
     return this.arrowLoaded
   }
 
   /**
-   * 惰性加载 arrow 扩展（community 仓：`INSTALL arrow FROM community`，1.2+ 起 arrow 从核心迁出）。
-   * 首次需联网，之后本地缓存；离线/缺失失败不抛（arrowIpc 回退 null → 调用方走 JS 行路径），只试一次。
+   * Node Neo 尚未提供 Arrow IPC 导出。保留此兼容接口，让上层稳定回退到 JS 行转换路径。
    */
   async ensureArrow(): Promise<boolean> {
     if (this.arrowLoaded) return true
     if (this.arrowTried) return false
     this.arrowTried = true
-    try {
-      await this.exec('INSTALL arrow FROM community')
-      await this.exec('LOAD arrow')
-      this.arrowLoaded = true
-      return true
-    } catch {
-      return false
-    }
+    return false
   }
 
   /**
-   * DuckDB 原生 Arrow IPC 导出：SQL → 单个 IPC 字节流（不经 JS 行对象）。
-   * 供大点图层 /webgis/arrow 的 duckCoords 路径提速（省掉 conn.all 的 N 行 JS 物化）。
-   * arrow 扩展不可用 / 超时 / 失败一律返回 null，调用方回退现有路径。
+   * Node Neo 尚未支持 Arrow IPC 导出；调用方以 null 回退到既有的 JS 行转换路径。
    */
-  async arrowIpc(sql: string): Promise<Uint8Array | null> {
-    if (!(await this.ensureArrow())) return null
-    const conn = this.conn as DuckDbConn | null
-    if (!conn?.arrowIPCAll) return null
-    return new Promise<Uint8Array | null>((resolve) => {
-      let done = false
-      const timer = setTimeout(() => {
-        if (done) return
-        done = true
-        resolve(null) // 超时视作不可用，回退调用方
-      }, this.opts.timeoutMs)
-      try {
-        conn.arrowIPCAll!(sql, (err, buffers) => {
-          if (done) return
-          done = true
-          clearTimeout(timer)
-          if (err || !buffers || buffers.length === 0) return resolve(null)
-          if (buffers.length === 1) return resolve(buffers[0]!)
-          const total = buffers.reduce((s, b) => s + b.byteLength, 0)
-          const out = new Uint8Array(total)
-          let offset = 0
-          for (const b of buffers) {
-            out.set(b, offset)
-            offset += b.byteLength
-          }
-          resolve(out)
-        })
-      } catch {
-        if (!done) {
-          done = true
-          clearTimeout(timer)
-        }
-        resolve(null)
-      }
-    })
+  async arrowIpc(_sql: string): Promise<Uint8Array | null> {
+    await this.ensureArrow()
+    return null
   }
 
   /** 下一个表名（进程内递增，跨会话全局唯一）。 */
@@ -199,9 +138,9 @@ export class DuckDbEngine {
   }
 
   /** 单条 SQL → 行数组。Promise.race 兜底超时。 */
-  run(sql: string, params?: unknown[]): Promise<DuckDbRow[]> {
-    this.init()
-    const conn = this.conn as DuckDbConn
+  async run(sql: string, params?: unknown[]): Promise<DuckDbRow[]> {
+    await this.init()
+    const conn = this.conn as DuckDBConnection
     return new Promise<DuckDbRow[]>((resolve, reject) => {
       let done = false
       const timer = setTimeout(() => {
@@ -209,15 +148,76 @@ export class DuckDbEngine {
         done = true
         reject(new Error(`DuckDB 查询超时（>${this.opts.timeoutMs}ms）：${sql.slice(0, 120)}`))
       }, this.opts.timeoutMs)
-      const cb = (err: Error | null, rows: DuckDbRow[]): void => {
+      void conn.runAndReadAll(sql, params as never).then((reader) => {
         if (done) return
         done = true
         clearTimeout(timer)
-        if (err) reject(err)
-        else resolve(rows)
-      }
-      if (params && params.length > 0) conn.all(sql, params, cb)
-      else conn.all(sql, cb)
+        resolve(reader.getRowObjectsJS() as DuckDbRow[])
+      }, (err: unknown) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        reject(err)
+      })
+    })
+  }
+
+  /**
+   * 专供大点图层的列式、分块读取：SQL 必须只返回 lon、lat 两列。
+   *
+   * 不创建 `{ lon, lat }` 行对象；Node Neo 每次只暴露一个 DuckDB data chunk，坐标直接写入
+   * interleaved Float64Array，供 GeoArrow 构造使用。空值、非数值和越界坐标与 rowsToGeoJSON
+   * 保持同一过滤语义。此接口刻意不取代 run()，避免普通 SQL 工具失去通用的行对象返回值。
+   */
+  async readPointCoordinates(sql: string): Promise<Float64Array> {
+    await this.init()
+    const conn = this.conn as DuckDBConnection
+    return new Promise<Float64Array>((resolve, reject) => {
+      let done = false
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        reject(new Error(`DuckDB 坐标读取超时（>${this.opts.timeoutMs}ms）：${sql.slice(0, 120)}`))
+      }, this.opts.timeoutMs)
+      void (async () => {
+        let positions = new Float64Array(8192)
+        let size = 0
+        const push = (lon: number, lat: number): void => {
+          if (size + 2 > positions.length) {
+            const grown = new Float64Array(positions.length * 2)
+            grown.set(positions)
+            positions = grown
+          }
+          positions[size++] = lon
+          positions[size++] = lat
+        }
+        const result = await conn.stream(sql)
+        for await (const chunk of result) {
+          const lons = chunk.getColumnValues(0)
+          const lats = chunk.getColumnValues(1)
+          const count = Math.min(lons.length, lats.length)
+          for (let i = 0; i < count; i++) {
+            const lonRaw = lons[i]
+            const latRaw = lats[i]
+            if (lonRaw == null || latRaw == null) continue
+            const lon = Number(lonRaw)
+            const lat = Number(latRaw)
+            if (!Number.isFinite(lon) || !Number.isFinite(lat) || lon < -180 || lon > 180 || lat < -90 || lat > 90) continue
+            push(lon, lat)
+          }
+        }
+        return positions.subarray(0, size)
+      })().then((positions) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(positions)
+      }, (err: unknown) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        reject(err)
+      })
     })
   }
 
@@ -227,9 +227,9 @@ export class DuckDbEngine {
   }
 
   /** 带指定超时（ms）的无结果语句；大表建表/灌表（read_csv/ST_Read/子集 CTAS）用长超时防误掐。 */
-  private execTimed(sql: string, timeoutMs: number): Promise<void> {
-    this.init()
-    const conn = this.conn as DuckDbConn
+  private async execTimed(sql: string, timeoutMs: number): Promise<void> {
+    await this.init()
+    const conn = this.conn as DuckDBConnection
     return new Promise<void>((resolve, reject) => {
       let done = false
       const timer = setTimeout(() => {
@@ -237,14 +237,17 @@ export class DuckDbEngine {
         done = true
         reject(new Error(`DuckDB 语句超时（>${timeoutMs}ms）：${sql.slice(0, 120)}`))
       }, timeoutMs)
-      const cb = (err: Error | null): void => {
+      void conn.run(sql).then(() => {
         if (done) return
         done = true
         clearTimeout(timer)
-        if (err) reject(err)
-        else resolve()
-      }
-      conn.exec(sql, cb)
+        resolve()
+      }, (err: unknown) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        reject(err)
+      })
     })
   }
 
@@ -390,8 +393,12 @@ export class DuckDbEngine {
     }))
   }
 
-  /** 检出 GEOMETRY 列里全部非零 SRID（去重）；ST_SRID 不可用/出错返回 []。 */
-  async detectSrids(table: string, column: string): Promise<number[]> {
+  /**
+   * 检出 GEOMETRY 列里全部非零 SRID（去重）。
+   * `probeFailed=true` = ST_SRID 本身不可用（**探测失败，不等于"数据没有 SRID"**）——
+   * 这两种情况的后果完全不同，必须分开返回，否则上层无法如实告知用户。
+   */
+  async detectSrids(table: string, column: string): Promise<{ srids: number[]; probeFailed: boolean }> {
     try {
       const rows = await this.run(
         `SELECT DISTINCT ST_SRID(${quoteIdent(column)}) AS srid FROM ${table} `
@@ -402,20 +409,20 @@ export class DuckDbEngine {
         const s = Number(r.srid)
         if (Number.isFinite(s) && s > 0) out.push(s)
       }
-      return [...new Set(out)]
+      return { srids: [...new Set(out)], probeFailed: false }
     } catch {
-      return [] // ST_SRID 不可用 → 按 WGS84 处理
+      return { srids: [], probeFailed: true } // ST_SRID 不可用 → 只能假设 WGS84
     }
   }
 
-  /** 自动检出 GEOMETRY 列的源坐标系：混合 SRID（>1 个非零）→ mixed=true 且 crs=null（拒绝整列自动重投影）。
-   *  单一非 4326 → crs=`EPSG:n`；0/4326/无 → crs=null。 */
-  async detectSourceCrs(table: string, column: string): Promise<{ crs: string | null; mixed: boolean; srids: number[] }> {
-    const srids = await this.detectSrids(table, column)
-    if (srids.length === 0) return { crs: null, mixed: false, srids }
-    if (srids.length > 1) return { crs: null, mixed: true, srids }
+  /** 自动检出 GEOMETRY 列的源坐标系。 */
+  async detectSourceCrs(table: string, column: string): Promise<SourceCrsInfo> {
+    const { srids, probeFailed } = await this.detectSrids(table, column)
+    if (probeFailed) return { crs: null, mixed: false, srids, status: 'assumed-probe-failed' }
+    if (srids.length > 1) return { crs: null, mixed: true, srids, status: 'mixed' }
+    if (srids.length === 0) return { crs: null, mixed: false, srids, status: 'assumed-undefined' }
     const srid = srids[0]!
-    return { crs: srid === 4326 ? null : `EPSG:${srid}`, mixed: false, srids }
+    return { crs: srid === 4326 ? null : `EPSG:${srid}`, mixed: false, srids, status: 'declared' }
   }
 
   /** 触摸表（更新 LRU 时间戳；后续筛选工具使用前调用）。 */
@@ -454,12 +461,13 @@ export class DuckDbEngine {
   /** 关闭引擎（插件卸载/进程退出）。 */
   async close(): Promise<void> {
     this.tables.clear()
-    if (this.db) {
-      const db = this.db
-      this.db = null
-      this.conn = null
-      await new Promise<void>((resolve) => db.close(() => resolve()))
-    }
+    const conn = this.conn
+    const db = this.db
+    this.conn = null
+    this.db = null
+    this.initPromise = null
+    try { conn?.closeSync() } catch { /* 已关闭时忽略 */ }
+    try { db?.closeSync() } catch { /* 已关闭时忽略 */ }
   }
 
   /** LRU：总行数超上限时按最久未用优先 DROP，直到达标。 */

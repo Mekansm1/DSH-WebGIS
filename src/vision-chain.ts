@@ -274,11 +274,12 @@ export async function analyzeScreenshotChain(
 ): Promise<VisionAnalysisResult> {
   // 红点只有用户手动点击底图时才画；捕获当前视野时图上没有任何标记，
   // 提示词也必须说清楚，否则模型会把画面中心当成用户指定的位置。
+  // ⚠️ 只给经纬度、**不给像素坐标**：像素↔经纬度换算已停止开放，报像素只会引模型去谈像素精度，
+  // 而实测视觉模型不具备像素测量能力（16% 图宽 ≈ 234m 误差）。视觉这边只做「识别语义」。
   const where = shot.pinned
-    ? `图中红色圆点是用户点击的关注位置，位于像素 (${Math.round(shot.pin.x)}, ${Math.round(shot.pin.y)})，`
-    : '这张图是当前视野的捕获，**图上没有任何标记**（不要假设有红点或图钉）；'
-      + `画面中心位于像素 (${Math.round(shot.pin.x)}, ${Math.round(shot.pin.y)})，`
-  const prompt = `这是用户地图的截图（截图上无文字坐标）。截图尺寸 ${shot.width}×${shot.height}px。${where}`
+    ? '图中红色圆点是用户点击的关注位置，'
+    : '这张图是当前视野的捕获，**图上没有任何标记**（不要假设有红点或图钉）；画面中心'
+  const prompt = `这是用户地图的截图（截图上无文字坐标）。${where}`
     + `对应经纬度 (${pick.lng.toFixed(5)}, ${pick.lat.toFixed(5)})。`
     + '请用中文描述这张地图截图：这是什么地理区域、图上可见的地名/要素、该位置附近有什么，'
     + '并综合判断这个位置最可能是什么地方。回答控制在 200 字以内。'

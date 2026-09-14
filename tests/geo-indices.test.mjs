@@ -14,7 +14,7 @@ function shape(over = {}) {
     featureCount: 100,
     materialized: true,
     bbox: [0, 0, 0.1, 0.1],
-    recommendedFields: [{ field: 'price', valid: 100, nullRate: 0, min: 1, max: 99, mean: 50, std: 28, unique: 98 }],
+    recommendedFields: [{ field: 'price', valid: 100, missing: 0, nullRate: 0, min: 1, max: 99, mean: 50, std: 28, unique: 98 }],
     excludedFields: [],
     ...over,
   }
@@ -37,7 +37,7 @@ test('opGini: 完全平均 = 0，极端集中 = 0.75', () => {
   assert.equal(concentrated.gini, 0.75)
 })
 
-test('opGini: 负值/合计为 0 报错，空值跳过并计数', () => {
+test('opGini: 负值/合计为 0 报错', () => {
   const neg = opGini(pointsOf([-1, 2, 3, 4]), 'v')
   assert.equal(neg.ok, false)
   assert.match(neg.message, /负值/)
@@ -45,14 +45,58 @@ test('opGini: 负值/合计为 0 报错，空值跳过并计数', () => {
   const zero = opGini(pointsOf([0, 0, 0, 0]), 'v')
   assert.equal(zero.ok, false)
   assert.match(zero.message, /合计为 0/)
+})
 
-  const withNull = opGini(featureCollection([
-    point([0, 0], { v: 1 }), point([0.001, 0], { v: 2 }),
-    point([0.002, 0], { v: 3 }), point([0.003, 0], { v: null }),
-  ]), 'v')
-  assert.equal(withNull.ok, true)
-  assert.equal(withNull.n, 3)
-  assert.equal(withNull.skipped, 1)
+// ---- 缺失值：不替用户决定（用户 2026-09-11 明确要求）----
+
+/** 1,2,3 加一个空值。 */
+const oneNull = () => featureCollection([
+  point([0, 0], { v: 1 }), point([0.001, 0], { v: 2 }),
+  point([0.002, 0], { v: 3 }), point([0.003, 0], { v: null }),
+])
+
+test('opGini: 有缺失且没指定策略 → 返回「请用户选」，而不是自己挑一个', () => {
+  const r = opGini(oneNull(), 'v')
+  assert.equal(r.ok, false)
+  assert.equal(r.missingDecision, true, '必须标记为待用户选择，而不是普通失败')
+  assert.equal(r.missing, 1)
+  assert.equal(r.total, 4)
+  assert.deepEqual(r.options, ['drop', 'zero'])
+  // 选项与后果要写进给用户看的话里
+  assert.match(r.message, /请先与用户确认/)
+  assert.match(r.message, /missing="drop"/)
+  assert.match(r.message, /missing="zero"/)
+  // 不能算出一个数来
+  assert.equal(r.gini, undefined)
+})
+
+test('opGini: 用户选定后两种策略给出不同结果（所以不能替他选）', () => {
+  const drop = opGini(oneNull(), 'v', { missing: 'drop' })
+  const zero = opGini(oneNull(), 'v', { missing: 'zero' })
+  assert.equal(drop.ok, true)
+  assert.equal(zero.ok, true)
+  assert.equal(drop.n, 3)
+  assert.equal(zero.n, 4, '当 0 参与 → 样本量含缺失行')
+  assert.equal(drop.missing, 1)
+  assert.equal(zero.missing, 1, 'missing 如实报缺失个数，与策略无关')
+  assert.equal(drop.missingPolicy, 'drop')
+  assert.equal(zero.missingPolicy, 'zero')
+  assert.notEqual(drop.gini, zero.gini, '两种处理必须给出不同答案')
+  // 丢弃 [1,2,3] 更平均；补 0 后 [0,1,2,3] 更不平等
+  assert.ok(zero.gini > drop.gini)
+})
+
+test('opGini: 没有缺失时不打扰用户（直接算，策略记为 none）', () => {
+  const r = opGini(pointsOf([1, 2, 3, 4]), 'v')
+  assert.equal(r.ok, true)
+  assert.equal(r.missing, 0)
+  assert.equal(r.missingPolicy, 'none')
+})
+
+test('opGini: 类别型策略不适用于基尼 → 明确拒绝而不是静默忽略', () => {
+  const r = opGini(oneNull(), 'v', { missing: 'asCategory' })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /不适用/)
 })
 
 // ---- 香农熵 ----
@@ -95,6 +139,60 @@ test('opShannon: 数值列自动按丰度解读（唯一值多），编码列落
   const neg = opShannon(pointsOf([-1, 2, 3, 4]), 'v', 'value')
   assert.equal(neg.ok, false)
   assert.match(neg.message, /负值/)
+})
+
+test('opShannon(类别): 有缺失且没指定策略 → 交回用户选（丢弃 vs 当成一个类别）', () => {
+  const fc = featureCollection([
+    point([0, 0], { k: 'a' }), point([0.001, 0], { k: 'b' }),
+    point([0.002, 0], { k: null }), point([0.003, 0], { k: 'a' }),
+  ])
+  const r = opShannon(fc, 'k', 'category')
+  assert.equal(r.ok, false)
+  assert.equal(r.missingDecision, true)
+  assert.equal(r.missing, 1)
+  assert.deepEqual(r.options, ['drop', 'asCategory'])
+  assert.match(r.message, /请先与用户确认/)
+})
+
+test('opShannon(类别): 当成一个独立类别会同时抬高 H 与类别数（所以两种处理不能混为一谈）', () => {
+  const fc = featureCollection([
+    point([0, 0], { k: 'a' }), point([0.001, 0], { k: 'b' }),
+    point([0.002, 0], { k: null }), point([0.003, 0], { k: 'a' }),
+  ])
+  const drop = opShannon(fc, 'k', 'category', { missing: 'drop' })
+  const asCat = opShannon(fc, 'k', 'category', { missing: 'asCategory' })
+  assert.equal(drop.ok, true)
+  assert.equal(asCat.ok, true)
+  assert.equal(drop.categories, 2, 'a/b 两类')
+  assert.equal(asCat.categories, 3, '多一个「缺失」类')
+  assert.ok(asCat.h > drop.h)
+  assert.equal(drop.missing, 1)
+  assert.equal(asCat.missing, 1, 'missing 如实报缺失个数，与策略无关')
+  assert.equal(drop.missingPolicy, 'drop')
+  assert.equal(asCat.missingPolicy, 'asCategory')
+})
+
+test('opShannon(数值/丰度): 缺失与「当 0」数学等价 → 不打扰用户，但要如实上报', () => {
+  // 丰度解读下 0 份额对 H 没有贡献，补 0 与丢弃等价（且补 0 会多出一个 p=0 的类别把均匀度算小）
+  const fc = featureCollection([
+    point([0, 0], { v: 10 }), point([0.001, 0], { v: 1 }),
+    point([0.002, 0], { v: 20 }), point([0.003, 0], { v: 5 }),
+    point([0.004, 0], { v: null }),
+  ])
+  const r = opShannon(fc, 'v', 'value')
+  assert.equal(r.ok, true, '丰度解读不该拦，因为不存在需要用户拍板的分歧')
+  assert.equal(r.missing, 1)
+  assert.equal(r.missingPolicy, 'drop')
+})
+
+test('opShannon(数值/丰度): 传入 asCategory → 明确说它不适用，而不是静默忽略', () => {
+  const fc = featureCollection([
+    point([0, 0], { v: 10 }), point([0.001, 0], { v: 1 }),
+    point([0.002, 0], { v: 20 }), point([0.003, 0], { v: null }),
+  ])
+  const r = opShannon(fc, 'v', 'value', { missing: 'asCategory' })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /不适用/)
 })
 
 // ---- Getis-Ord Gi* ----
@@ -251,6 +349,63 @@ test('judgeIndex + formatVerdict: 可行时给出候选字段与建议参数', (
   const card = formatVerdict(spec('shannon'), v)
   assert.match(card, /可以计算/)
   assert.match(card, /候选字段：price/)
+})
+
+// ---- 勘察阶段就要把缺失说清楚（而不是等用户提了要求才吃一个错误）----
+
+/** 带缺失的字段体检桩。 */
+const shapeWithMissing = (missing) => shape({
+  recommendedFields: [{
+    field: 'price', valid: 100 - missing, missing, nullRate: missing / 100,
+    min: 1, max: 99, mean: 50, std: 28, unique: 90,
+  }],
+})
+
+test('fieldStatLine: 缺几个要显性写出来，用户不该拿总数去减', () => {
+  const line = formatVerdict(spec('gini'), judgeIndex(spec('gini'), shapeWithMissing(7)))
+  assert.match(line, /缺 7/, '缺失个数必须直接出现在卡片上')
+  const clean = formatVerdict(spec('gini'), judgeIndex(spec('gini'), shape()))
+  assert.doesNotMatch(clean, /缺 /, '没缺失时不出现该字样')
+})
+
+test('formatVerdict: 空间类指数 + 候选字段全都有缺失 → 勘察阶段就判不可行（不能自相矛盾地说"可以计算"）', () => {
+  const v = judgeIndex(spec('moran_i'), shapeWithMissing(3))
+  assert.equal(v.feasible, false, '唯一候选字段有缺失 = 这个图层做不了空间自相关')
+  const card = formatVerdict(spec('moran_i'), v)
+  assert.match(card, /当前无法计算/)
+  assert.match(card, /缺 3/)
+  assert.doesNotMatch(card, /可以计算。/, '不能一边说可以算一边说字段不能用')
+  // 要给出可执行的两条路，而不是只说"不行"
+  assert.match(card, /filter_layer|set_attribute/)
+  assert.match(card, /不要用 0 去补/)
+})
+
+test('formatVerdict: 空间类指数但还有干净字段 → 可行，只是把脏字段点出来', () => {
+  const mixed = shape({
+    recommendedFields: [
+      { field: 'pop', valid: 97, missing: 3, nullRate: 0.03, min: 1, max: 99, mean: 50, std: 28, unique: 90 },
+      { field: 'gdp', valid: 100, missing: 0, nullRate: 0, min: 1, max: 99, mean: 50, std: 28, unique: 95 },
+    ],
+  })
+  const v = judgeIndex(spec('moran_i'), mixed)
+  assert.equal(v.feasible, true)
+  const card = formatVerdict(spec('moran_i'), v)
+  assert.match(card, /不能\*\*用于本指数/)
+  assert.match(card, /pop（缺 3）/)
+})
+
+test('formatVerdict: 非空间指数在勘察阶段说清"缺失会改变结果，计算时要问用户"', () => {
+  const card = formatVerdict(spec('gini'), judgeIndex(spec('gini'), shapeWithMissing(3)))
+  assert.match(card, /会改变结果/)
+  assert.match(card, /问用户|交回给你/)
+})
+
+test('格式完整性：新增的 missing 字段是判定结构的一部分，不是可选装饰', () => {
+  // 所有 recommend 的字段桩都该带 missing（否则界面报不出"缺几个"）
+  for (const id of ['gini', 'shannon', 'moran_i', 'getis_ord']) {
+    const card = formatVerdict(spec(id), judgeIndex(spec(id), shape()))
+    assert.ok(typeof card === 'string' && card.length > 0, `${id} 卡片生成失败`)
+  }
 })
 
 test('注册表完整性：每条都有说明/参数/工具名，id 唯一', () => {

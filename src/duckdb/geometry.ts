@@ -20,6 +20,76 @@ const COORD_PAIRS: Array<[string, string]> = [
   ['lon_bd09', 'lat_bd09'],
 ]
 
+// ---------------------------------------------------------------- 源坐标系：检出结论与如实上报
+
+/**
+ * 源坐标系的检出结论。
+ *
+ * ⚠ **`crs === null` 有三种完全不同的原因，绝不能混为一谈**：
+ * 「明确声明了 4326」是事实，「SRID=0 未声明」和「ST_SRID 探不出来」都只是**假设**按 WGS84 解释。
+ * 后者若猜错（原数据其实是投影坐标），距离/面积/缓冲会全错，而**结果看上去完全正常** ——
+ * 这是本插件最危险的一类静默失败，所以必须把 status 一路带到给模型看的话里。
+ */
+export type SourceCrsStatus =
+  /** 几何列明确声明了 SRID（4326，或已识别出的其他 EPSG） */
+  | 'declared'
+  /** 未声明（SRID=0）→ 按 WGS84 解释，但这是假设 */
+  | 'assumed-undefined'
+  /** 探测本身失败（ST_SRID 不可用）→ 同样只能假设 WGS84 */
+  | 'assumed-probe-failed'
+  /** 列内混有多个 SRID → 拒绝自动重投影 */
+  | 'mixed'
+
+export interface SourceCrsInfo {
+  /** 需重投影时用的源 CRS（`EPSG:n`）；null = 无需重投影或未确认，看 status。 */
+  crs: string | null
+  mixed: boolean
+  srids: number[]
+  status: SourceCrsStatus
+}
+
+/** 检出结论 → 给模型看的一句话。**永远不返回空串** —— 沉默正是问题所在。 */
+export function crsReport(info: Pick<SourceCrsInfo, 'crs' | 'srids' | 'status'>): string {
+  switch (info.status) {
+    case 'declared':
+      return info.crs ? `坐标系：源为 ${info.crs}，已自动转换到 4326` : '坐标系：已声明 4326'
+    case 'assumed-undefined':
+      return '⚠ 坐标系：数据**未声明 CRS**（SRID=0），已按 WGS84 解释 —— 这是假设，不是事实。'
+        + '若原数据其实是投影坐标，位置、距离、面积、缓冲会**全部错误且看不出异常**。'
+        + '请与用户确认；确为投影数据请重载并显式传 sourceCrs。'
+    case 'assumed-probe-failed':
+      return '⚠ 坐标系：**无法探测源 CRS**（ST_SRID 不可用），已按 WGS84 解释 —— 同样是假设。'
+        + '若原数据是投影坐标，量算结果会全错而不报错；请与用户确认后重载并传 sourceCrs。'
+    case 'mixed':
+      return `坐标系：列内混有多个 SRID（${info.srids.join(', ')}），已拒绝自动重投影`
+  }
+}
+
+/**
+ * 经纬度范围自检：真实经纬度必然落在 lon∈[-180,180]、lat∈[-90,90]。
+ *
+ * **越界 = 极可能是投影坐标被当成了经纬度。** 这是把上面那种静默错误变成响亮错误的
+ * 最便宜抓手 —— 只用一个 bbox，不依赖任何 CRS 元数据。
+ */
+export function looksProjected(bbox: number[] | null | undefined): boolean {
+  if (!bbox || bbox.length < 4) return false
+  const [w, s, e, n] = bbox as [number, number, number, number]
+  if (![w, s, e, n].every((v) => Number.isFinite(v))) return false
+  return Math.abs(w) > 180 || Math.abs(e) > 180 || Math.abs(s) > 90 || Math.abs(n) > 90
+}
+
+/** 坐标越界时的告警（给模型看）。bbox 正常返回空串。 */
+export function crsRangeWarning(bbox: number[] | null | undefined, status: SourceCrsStatus): string {
+  if (!looksProjected(bbox)) return ''
+  const [w, s, e, n] = bbox as [number, number, number, number]
+  const assumed = status === 'assumed-undefined' || status === 'assumed-probe-failed'
+  return `🚨 坐标范围异常：bbox=[${w}, ${s}, ${e}, ${n}] 超出经纬度取值范围（lon±180 / lat±90）。`
+    + (assumed
+      ? '这与「数据未声明 CRS、已按 WGS84 解释」的假设**相互印证为假** —— 原数据几乎可以肯定是投影坐标。'
+        + '**请立刻告诉用户：当前图层的位置与所有量算结果都不可信**，需要重载并显式传 sourceCrs（如 EPSG:3857 / EPSG:32650）。'
+      : '请检查源坐标系设置是否正确，量算结果可能不可信。')
+}
+
 /**
  * 从列名表探测经纬度列：显式传入优先（lonField/latField 必须都在列里，否则返回 null）；
  * 否则按 lon/lat、longitude/latitude、lng/lat、lon_ / lat_ 前缀的优先级找。

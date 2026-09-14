@@ -14,7 +14,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { FeatureCollection } from 'geojson'
 import type { DisplayMode } from './geo-processing.js'
 import {
-  defaultWeightFor, opAverageNearestNeighbor, opKernelDensity, opLocalMoranI, opMoranI,
+  defaultWeightFor, minMax, opAverageNearestNeighbor, opKernelDensity, opLocalMoranI, opMoranI,
   PERMUTATIONS_DEFAULT, type WeightType,
 } from './geo-stats.js'
 import type { GeoToolRuntime } from './geo-tools-runtime.js'
@@ -36,6 +36,8 @@ const WEIGHT_PARAMS = {
 export interface FieldReport {
   field: string
   valid: number
+  /** 空值 + 非数值的绝对个数（用户要一眼看到「缺几个」，而不是拿总数去减）。 */
+  missing: number
   nullRate: number
   min: number
   max: number
@@ -77,9 +79,10 @@ export function inspectFields(fc: FeatureCollection): { recommended: FieldReport
     const report: FieldReport = {
       field,
       valid,
+      missing: nullish + nonNumeric,
       nullRate,
-      min: valid ? Math.min(...nums) : 0,
-      max: valid ? Math.max(...nums) : 0,
+      min: valid ? minMax(nums).min : 0,
+      max: valid ? minMax(nums).max : 0,
       mean: 0,
       std: 0,
       unique: new Set(nums).size,
@@ -104,9 +107,9 @@ export function inspectFields(fc: FeatureCollection): { recommended: FieldReport
   return { recommended, excluded }
 }
 
-/** 一行字段摘要（给用户看的确认卡片用）。 */
+/** 一行字段摘要（给用户看的确认卡片用）。缺值必须显性写出来。 */
 export function fieldLine(r: FieldReport): string {
-  return `${r.field}（有效 ${r.valid}，均值 ${r.mean}，标准差 ${r.std}，唯一值 ${r.unique}）`
+  return `${r.field}（有效 ${r.valid}${r.missing > 0 ? `，**缺 ${r.missing}**` : ''}，均值 ${r.mean}，标准差 ${r.std}，唯一值 ${r.unique}）`
 }
 
 export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {

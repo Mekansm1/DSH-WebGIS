@@ -8,6 +8,22 @@ import { centroid } from '@turf/centroid'
 import { distance } from '@turf/distance'
 import { feature as makeFeature, featureCollection as fc } from '@turf/helpers'
 import { booleanIntersects } from '@turf/boolean-intersects'
+
+/**
+ * 数组最小/最大值。
+ * ⚠ **不要用 `Math.min(...xs)` / `Math.max(...xs)`**：展开成实参受 V8 实参上限限制
+ * （实测 10 万 OK、12.5 万 RangeError），
+ * 大图层（本项目实测过 65 万行）会直接崩。凡是对「要素数量级」的数组求极值一律走这里。
+ */
+export function minMax(xs: readonly number[]): { min: number; max: number } {
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  for (const x of xs) {
+    if (x < min) min = x
+    if (x > max) max = x
+  }
+  return { min, max }
+}
 import { intersect as turfIntersect } from '@turf/intersect'
 import { bboxOf, geometryTypesOf } from './geo-processing.js'
 

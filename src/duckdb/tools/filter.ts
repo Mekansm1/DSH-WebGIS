@@ -37,16 +37,22 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
   ctx.tools.register(defineTool({
     name: 'webgis_filter_layer',
     description:
-      '对 DuckDB CSV 大文件图层（webgis_load_csv 加载、含内存表）跑条件筛选 → 新图层（秒回）。'
+      '对**含 DuckDB 内存表的大图层**跑条件筛选 → 新图层（秒回）。**来源不限**：webgis_load_csv 的 CSV、'
+      + 'webgis_load_dataset 的 shp/geojson 大文件、以及本工具产物都带内存表，**只要 webgis_list_layers 里有 duckTable 就能筛**。'
+      + '⚠ 与本工具易混的：**已筛小的普通图层**按属性筛选用 webgis_select_by_value、按位置筛选用 webgis_select_by_location；'
+      + '**几何列图层的围栏/半径筛选**用 webgis_spatial_filter（本工具在几何列图层上只支持 where 列等于筛选）。'
       + '条件可叠加：where=等于筛选（JSON 对象、多字段取交集）、bbox={west,south,east,north} 经纬度范围、'
       + 'radius（米）+ center={lon,lat} 圆心半径（haversine 大圆距离）、'
       + 'polygon=GeoJSON 面（或 polygonLayer=面图层 id）做围栏内筛选（ST_Within，跑全表，需已联网装过 spatial 扩展）。'
       + '结果按行数自动决定加载：≤5 万直接上图、5万~10万先询问用户是否聚合（返回 need_confirm）、'
       + '10万~20万自动聚合（supercluster）、>20 万不加载返回缩小范围建议。'
-      + '几何列图层（webgis_load_csv 的 WKT/WKB/GEOMETRY 列产物、无经纬度列）仅支持 where 列等于筛选；'
+      + '几何列图层（无经纬度列，如 shp/geojson 的几何列）仅支持 where 列等于筛选；'
       + 'bbox/radius/polygon 依赖经纬度列，暂不支持。'
       + '新图层保留 DuckDB 内存表（可继续链式筛选），移除时自动释放。'
-      + '只支持 source=csv 且有内存表的图层（webgis_load_csv / 本工具 / webgis_sql_layer 产物）。',
+      + '只要图层有内存表就能用（不看 source；shp/geojson 大层与 csv 一样有完整 duck 表与属性列）。'
+      + '⚠ webgis_list_layers 里 materialized=false 表示「地图上显示的只是抽样」，此时**必须**用本工具在全表上筛，'
+      + '用 Turf 类工具（select_by_value 等）只会筛到抽样、结果看着正常其实是错的。'
+      + '⚠ 不含 webgis_sql_layer 的产物 —— SQL 结果已物化、不带内存表，传进来会报错；要在 SQL 结果上再筛请用 webgis_select_by_value。',
     parameters: {
       layer: { type: 'string', required: true, description: '目标 DuckDB CSV 图层 id（webgis_list_layers 查看）' },
       where: { type: 'json', description: '等于筛选：JSON 对象 {"adname":"天河区"}，多字段取交集' },
@@ -199,9 +205,11 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
   ctx.tools.register(defineTool({
     name: 'webgis_layer_stats',
     description:
-      '对 DuckDB CSV 图层（webgis_load_csv / webgis_filter_layer 产物）跑统计：总行数 +（可选字段的）'
-      + 'distinct 去重数 / min / max / avg + Top10 分布。不物化数据、不建图层。'
-      + '统计类查询优先用它而不是 webgis_sql_layer。',
+      '对**含 DuckDB 内存表的大图层**跑**全表**统计：总行数 +（可选字段的）'
+      + 'distinct 去重数 / min / max / avg + Top10 分布。不物化数据、不建图层。**来源不限**（csv / shp / geojson 大层，'
+      + '只要 webgis_list_layers 里有 duckTable）。'
+      + '统计类查询优先用它而不是 webgis_sql_layer。'
+      + '⚠ materialized=false 的图层（地图上只是抽样）做统计**只能**用本工具：webgis_feature_summary 只统计上图抽样，结论会偏。',
     parameters: {
       layer: { type: 'string', required: true, description: '目标 DuckDB CSV 图层 id（webgis_list_layers 查看）' },
       field: { type: 'string', description: '要统计的字段名（缺省只返回总行数）' },
@@ -278,9 +286,10 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
   ctx.tools.register(defineTool({
     name: 'webgis_export_layer',
     description:
-      '把图层的当前内容导出为文件：CSV（几何列以 WKT 保存）或 GeoJSON。path 可选（缺省导出到 ~/.dsh/webgis-exports/）。'
-      + '返回导出文件的绝对路径。注意：DuckDB 大文件图层导出的是上图子集（抽样）；'
-      + '要导出完整筛选结果，请先 webgis_filter_layer 筛出子集，再导出结果图层。',
+      '【导出一个图层为文件】把图层的当前内容导出为 CSV（几何列以 WKT 保存）或 GeoJSON，返回文件绝对路径。path 可选（缺省 ~/.dsh/webgis-exports/）。'
+      + '⚠ 三个「导出」别混：本工具产**文件**（CSV/GeoJSON）；用户要**图片**用 webgis_export_map；'
+      + '用户要**当前视野的底图数据**（河流/道路/建筑等）用 webgis_export_basemap（那个不产文件，是新建图层）。'
+      + '注意：DuckDB 大文件图层导出的是上图子集（抽样）；要导出完整筛选结果，先用支持该图层类型的筛选工具筛出子集再导出。',
     parameters: {
       layer: { type: 'string', required: true, description: '要导出的图层 id（webgis_list_layers 查看）' },
       format: { type: 'string', enum: ['csv', 'geojson'], description: '导出格式：csv=逗号分隔（几何列 WKT）、geojson=GeoJSON' },

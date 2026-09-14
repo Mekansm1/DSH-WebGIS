@@ -14,6 +14,7 @@
  */
 import type { BBox, Feature, FeatureCollection, Geometry, MultiPolygon, Point, Polygon } from 'geojson'
 import { DECK_EFFECT_MODES, pickRenderer } from './render-policy.js'
+import type { ThematicSpec } from './thematic.js'
 import { bbox as turfBbox } from '@turf/bbox'
 import { bboxPolygon as turfBboxPolygon } from '@turf/bbox-polygon'
 import { buffer as turfBuffer } from '@turf/buffer'
@@ -76,6 +77,12 @@ export interface GisLayer {
   /** 内填充颜色（覆盖 color 用于填充；点=圆点填充、面=多边形填充），缺省用 color。 */
   fillColor?: string
   /**
+   * 专题配色（按字段上色）。设置后**覆盖** color/fillColor 的填充语义：每个要素按各自字段值取色。
+   * 断点与颜色全在 host 算好（见 thematic.ts），客户端只做「值 → 颜色」的查表。
+   * 与 mode/color 一样属纯展示变更，不改数据、不 bump rev。
+   */
+  thematic?: ThematicSpec
+  /**
    * DuckDB 内存表名（source='csv' 的大文件图层）：建表时写入，供 `webgis_filter_layer` 等
    * 后续筛选工具直接跑 SQL；图层移除 / 清空时对应表被 DROP。仅 host 侧内部使用，不下发客户端。
    */
@@ -111,6 +118,7 @@ export interface LayerSummary {
   pointRadius?: number
   pointStrokeWidth?: number
   fillColor?: string
+  thematic?: ThematicSpec
   totalCount?: number
   materialized: boolean
   renderer: 'maplibre' | 'deck'
@@ -350,9 +358,11 @@ export function opConvexHull(layer: GisLayer): FeatureCollection {
 
 /** 全要素外接矩形面。 */
 export function opBBoxPolygon(layer: GisLayer): FeatureCollection {
-  const b = bboxOf(layer.geojson)
+  // 用 layer.bbox 而不是重算 geojson 的：大图层（duckTable）的 geojson 只是上图抽样，
+  // 重算会给出**系统性偏小**的外接矩形；layer.bbox 在全量物化层上就等于 geojson bbox，所以是严格更优。
+  const b = layer.bbox ?? bboxOf(layer.geojson)
   if (!b) return EMPTY_FC
-  return fc([turfBboxPolygon(b)])
+  return fc([turfBboxPolygon(b as [number, number, number, number])])
 }
 
 /**

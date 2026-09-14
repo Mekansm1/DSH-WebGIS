@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { tableFromIPC } from 'apache-arrow'
 import wkx from 'wkx'
 import { DuckDbEngine } from '../lib/duckdb.js'
-import { pointsToGeoArrowTable, tableToIpc, wkbRowsToGeoArrowTable } from '../lib/geoarrow.js'
+import { pointCoordinatesToGeoArrowTable, pointsToGeoArrowTable, tableToIpc, wkbRowsToGeoArrowTable } from '../lib/geoarrow.js'
 
 test('pointsToGeoArrowTable：结构 + 扩展元数据 + IPC 往返', () => {
   const rows = [
@@ -49,6 +49,15 @@ test('pointsToGeoArrowTable：空属性（attrs=[]）→ 只出几何列（arrow
   const back = tableFromIPC(tableToIpc(table))
   assert.equal(back.numCols, 1)
   assert.equal(back.schema.fields.find((f) => f.name === '__geometry')?.metadata.get('ARROW:extension:name'), 'geoarrow.point')
+})
+
+test('pointCoordinatesToGeoArrowTable：直接复用列式坐标缓冲区，不经 JS 行对象', () => {
+  const positions = new Float64Array([113.3, 23.1, 113.4, 23.2])
+  const table = pointCoordinatesToGeoArrowTable(positions)
+  assert.equal(table.numRows, 2)
+  assert.equal(table.numCols, 1)
+  assert.deepEqual(Array.from(table.getChild('__geometry')?.get(1) ?? []), [113.4, 23.2])
+  assert.equal(table.schema.fields[0]?.metadata.get('ARROW:extension:name'), 'geoarrow.point')
 })
 
 test('wkbRowsToGeoArrowTable：WKB → GeoArrow（经 objex-utils，混合几何取主类型）', () => {

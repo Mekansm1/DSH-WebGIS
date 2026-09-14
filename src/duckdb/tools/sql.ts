@@ -39,14 +39,14 @@ export function registerSqlTools(ctx: Context, deps: DuckToolDeps): void {
   ctx.tools.register(defineTool({
     name: 'webgis_sql_layer',
     description:
-      '对 DuckDB CSV 图层的内存表执行只读 SQL（仅 SELECT/WITH/EXPLAIN；禁写操作/分号/注释）。'
+      '对**含 DuckDB 内存表的图层**（来源不限：csv / shp / geojson 大层）执行只读 SQL（仅 SELECT/WITH/EXPLAIN；禁写操作/分号/注释）。'
       + 'SQL 里用 __layer__ 指代目标图层的表，如 "SELECT adname, count(*) FROM __layer__ GROUP BY adname"。'
       + '系统先统计结果行数：超过上限（默认 5000、可用 limit 调大、硬上限 50000）不执行并给建议。'
       + '结果含几何列（GEOMETRY/WKT/WKB，自动识别、优先级高于经纬度）或经纬度列（lon/lat 等）会自动上图成新图层'
       + '（物化结果，不再可链式筛选）；都没有则返回前 10 行预览。几何列需 spatial 扩展（首次联网），可传 sourceCrs 指定源坐标系。'
       + '优先用 webgis_layer_stats（统计）和 webgis_filter_layer（筛选），本工具留给复杂 SQL。',
     parameters: {
-      layer: { type: 'string', required: true, description: '目标 DuckDB CSV 图层 id（SQL 里用 __layer__ 指代其表）' },
+      layer: { type: 'string', required: true, description: '目标图层 id（有 DuckDB 内存表即可，来源不限；SQL 里用 __layer__ 指代其表）' },
       sql: { type: 'string', required: true, description: '只读 SQL，__layer__ 指代目标图层的内存表' },
       limit: { type: 'integer', description: '结果行数上限（默认 5000，最大 50000）' },
       sourceCrs: {

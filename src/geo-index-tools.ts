@@ -16,12 +16,25 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { GisLayer } from './geo-processing.js'
 import { fieldLine, inspectFields } from './geo-stats-tools.js'
 import {
-  INDEX_SPECS, findIndexSpec, formatVerdict, geometryFamily, judgeIndex, opGetisOrd, opGini, opShannon,
-  type LayerShape,
+  INDEX_SPECS, findIndexSpec, formatVerdict, geometryFamily, isMissingDecision, judgeIndex,
+  opGetisOrd, opGini, opShannon,
+  type LayerShape, type MissingPolicy,
 } from './geo-indices.js'
 import type { GeoToolRuntime } from './geo-tools-runtime.js'
 
 const FAMILY_LABEL: Record<string, string> = { point: '点', polygon: '面', line: '线', mixed: '混杂', none: '无几何' }
+
+/** 工具入参 → 缺失值策略（认不出/未传 → undefined，交给 op* 返回「请用户选」）。 */
+function asMissingPolicy(v: unknown): MissingPolicy | undefined {
+  return v === 'drop' || v === 'zero' || v === 'asCategory' ? v : undefined
+}
+
+/** 结果里回述「按用户定的哪种处理算了」。 */
+const MISSING_POLICY_LABEL: Record<string, string> = {
+  drop: '丢弃',
+  zero: '当 0 计入',
+  asCategory: '当成一个独立类别',
+}
 
 /** 图层 → 判定用的数据形态（只读摘要 + 字段体检，不重拉数据、不计算）。 */
 function shapeOf(layer: GisLayer): LayerShape {
@@ -48,12 +61,14 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
   ctx.tools.register(defineTool({
     name: 'webgis_stat_inspect',
     description: COMMON
-      + '【任何指数/统计计算的第一步·必须先调用】体检工作区数据，判断用户想算的指数能不能做、用什么字段与参数。'
+      + '【本目录内指数计算的第一步·必须先调用】体检工作区数据，判断用户想算的指数能不能做、用什么字段与参数。'
+      + '⚠ 本工具**不含莫兰指数**：用户要做莫兰 / 局部莫兰 / LISA 时，改用 webgis_moran_inspect（那是它专属的第一步）。'
       + '不传 index：扫描当前会话全部图层，逐个列出可算的指数；'
-      + '传 index（用用户的说法即可，如「基尼系数」「香农熵」「热点分析」「核密度」「莫兰」）：针对该指数给出'
+      + '传 index（用用户的说法即可，如「基尼系数」「香农熵」「热点分析」「核密度」）：针对该指数给出'
       + '可用候选字段（含有效值/均值/标准差/唯一值）、被排除字段及原因、建议参数、不可行时的原因与修正建议。'
       + '本工具**不执行任何统计计算**。拿到结果后必须把结论展示给用户并等待确认（用户可改字段、权重、带宽等）；'
-      + '未获确认前不得调用任何计算工具，也不得自行替用户选字段。'
+      + '未获确认前不得调用本目录的计算工具（gini / shannon / getis_ord / kernel_density），也不得自行替用户选字段。'
+      + '注：这条门禁只管指数计算；单纯的字段级统计（webgis_feature_summary / webgis_layer_stats 求个均值/计数）不需要先走本工具。'
       + '若该指数不在已知目录内，本工具会返回图层的数据形态与字段清单（不会只回一句不支持）：'
       + '此时可按公式用 webgis_sql_layer 计算，但必须告知用户公式由模型生成、未经框架校验，结果仅供参考。',
     parameters: {
@@ -130,7 +145,7 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
             geometryFamily: fam,
             materialized: shape.materialized,
             totalCount: shape.totalCount,
-            numericFields: shape.recommendedFields.map((f) => ({ field: f.field, valid: f.valid, min: f.min, max: f.max, mean: f.mean, unique: f.unique })),
+            numericFields: shape.recommendedFields.map((f) => ({ field: f.field, valid: f.valid, missing: f.missing, min: f.min, max: f.max, mean: f.mean, unique: f.unique })),
             excludedFields: shape.excludedFields.map((f) => ({ field: f.field, reason: f.excluded })),
           })
           lines.push(`图层「${layer.name}」(${layer.id})：${shape.featureCount} 个要素（${FAMILY_LABEL[fam]}${shape.materialized ? '' : `，抽样显示 ${shape.featureCount}/${shape.totalCount ?? '?'} 行`}）；`
@@ -187,6 +202,10 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
     parameters: {
       layer: { type: 'string', required: true, description: '目标图层 id' },
       field: { type: 'string', required: true, description: '要统计的数值字段（非负）' },
+      missing: {
+        type: 'string',
+        description: '缺失值怎么处理，**仅在字段确有缺失时才有意义，且必须由用户选**：drop=丢弃这些要素（认定它们不属于总体）、zero=当 0 参与（认定它们份额为零）。留空则工具不计算，返回选项让你去问用户',
+      },
     },
     output: { schema: STAT_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
@@ -195,7 +214,9 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
       const { resolve } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const res = opGini(layer.geojson, args.field)
+      const res = opGini(layer.geojson, args.field, { missing: asMissingPolicy(args.missing) })
+      // 需要用户先定「缺失值怎么办」—— 不是失败，是把选择交回对话，别当错误重试。
+      if (isMissingDecision(res)) return Promise.resolve({ ok: false, message: res.message, needsUserChoice: true })
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       const sampleNote = layer.materialized === false
         ? `（⚠ 基于抽样 ${res.n}/${layer.totalCount ?? '?'} 行计算，基尼系数会失真，建议先筛出全量图层重算）`
@@ -207,14 +228,16 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
           field: args.field,
           gini: res.gini,
           n: res.n,
-          skipped: res.skipped,
+          missing: res.missing,
+          missingPolicy: res.missingPolicy,
           sum: res.sum,
           mean: res.mean,
           min: res.min,
           max: res.max,
         },
         message: `基尼系数 G=${res.gini}（0=完全平均，越接近 1 越不平均），字段「${args.field}」，基于 ${res.n} 个要素`
-          + `${res.skipped ? `（另有 ${res.skipped} 个空值/非数值已跳过）` : ''}；合计 ${res.sum}、均值 ${res.mean}、范围 ${res.min}~${res.max}。`
+          + `${res.missing ? `（按用户选定的 ${MISSING_POLICY_LABEL[res.missingPolicy] ?? res.missingPolicy} 处理了 ${res.missing} 个空值/非数值）` : ''}`
+          + `；合计 ${res.sum}、均值 ${res.mean}、范围 ${res.min}~${res.max}。`
           + `${sampleNote}${REMINDER}`,
       })
     },
@@ -232,6 +255,10 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
       layer: { type: 'string', required: true, description: '目标图层 id' },
       field: { type: 'string', required: true, description: '分类字段或数值字段' },
       mode: { type: 'string', enum: ['auto', 'category', 'value'], description: 'category=按类别计数；value=数值当丰度；auto=自动（默认）' },
+      missing: {
+        type: 'string',
+        description: '缺失值怎么处理。**按类别统计时才有意义，且必须由用户选**：drop=丢弃、asCategory=把缺失当成一个独立类别。按数值（丰度）统计时缺失与「当 0」等价，不需要选。留空则工具不计算，返回选项让你去问用户',
+      },
     },
     output: { schema: STAT_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
@@ -241,7 +268,8 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const mode = args.mode === 'category' || args.mode === 'value' ? args.mode : 'auto'
-      const res = opShannon(layer.geojson, args.field, mode)
+      const res = opShannon(layer.geojson, args.field, mode, { missing: asMissingPolicy(args.missing) })
+      if (isMissingDecision(res)) return Promise.resolve({ ok: false, message: res.message, needsUserChoice: true })
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       const modeLabel = res.mode === 'value' ? '按数值（丰度）' : '按类别'
       const top = res.top.map((t) => `${t.key} ${(t.share * 100).toFixed(1)}%`).join('、')
@@ -257,10 +285,17 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
           evenness: res.evenness,
           categories: res.categories,
           n: res.n,
+          missing: res.missing,
+          missingPolicy: res.missingPolicy,
           top: res.top as unknown as JsonValue,
         },
         message: `香农熵 H=${res.h}（上限 ${res.hMax}），均匀度 E=${res.evenness}（1=完全均匀，越小越集中），`
           + `字段「${args.field}」${modeLabel}统计，共 ${res.categories} 类 / ${res.n} 个要素。占比前几：${top}。`
+          + (res.missing
+            ? `缺失 ${res.missing} 个，按${MISSING_POLICY_LABEL[res.missingPolicy] ?? res.missingPolicy}处理`
+              + (res.missingPolicy === 'asCategory' ? `（在「占比前几」里可能显示为「${'(空值/缺失)'}」这一类）` : '')
+              + '。'
+            : '')
           + `${sampleNote}${REMINDER}`,
       })
     },

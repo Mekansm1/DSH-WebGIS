@@ -5,7 +5,7 @@
  */
 import type { ExpressionSpecification, FilterSpecification, LayerSpecification } from 'maplibre-gl'
 import type { FeatureCollection } from 'geojson'
-import type { DisplayMode, LayerSummary } from './gis-types.js'
+import { NO_DATA_COLOR, type DisplayMode, type LayerSummary, type ThematicSpec } from './gis-types.js'
 
 export type RenderKind = 'fill' | 'line' | 'circle'
 
@@ -24,20 +24,55 @@ export interface RenderStyle {
   pointRadius?: number
   pointStrokeWidth?: number
   fillColor?: string
+  /** 专题配色：设置后填充色由**字段值**决定，覆盖 fillColor/color。 */
+  thematic?: ThematicSpec
+}
+
+/**
+ * 专题配色 → maplibre 数据驱动表达式。
+ *
+ * ⚠ **缺值必须单独判**：`['get', field]` 拿不到值时是 null，若直接喂给 `step` 会被当成
+ * 最小值从而落进第一级 —— 那正是「把没有值画成值很小」的静默误导。所以数值型外面套
+ * `case` 判空走中性灰；分类型的 `match` 末位兜底天然覆盖缺值。
+ *
+ * 返回 maplibre ExpressionSpecification，但本模块不引 maplibre 类型（客户端 chunk 外），故用 unknown。
+ */
+export function thematicPaint(spec: ThematicSpec): unknown {
+  const get: unknown[] = ['get', spec.field]
+  if (spec.categories && spec.categories.length > 0) {
+    const args: unknown[] = ['match', ['to-string', get]]
+    spec.categories.forEach((cat, i) => {
+      args.push(cat, spec.colors[i] ?? NO_DATA_COLOR)
+    })
+    args.push(NO_DATA_COLOR) // 兜底：未列出的取值与缺值都落这里
+    return args
+  }
+  const step: unknown[] = ['step', ['number', get, 0], spec.colors[0] ?? NO_DATA_COLOR]
+  spec.breaks.forEach((b, i) => {
+    step.push(b, spec.colors[i + 1] ?? NO_DATA_COLOR)
+  })
+  // to-string(null) === ''，用它判「该要素在这个字段上没有值」
+  return ['case', ['==', ['to-string', get], ''], NO_DATA_COLOR, step]
+}
+
+/** 填充/线条色：有专题配置就用表达式，否则退回单色。 */
+function fillPaintOf(style: RenderStyle): unknown {
+  return style.thematic ? thematicPaint(style.thematic) : (style.fillColor ?? style.color)
 }
 
 /** 渲染一个普通要素层；聚合模式下 circle 层带 filter 排除聚合点（!has point_count）。
- *  fill 层填充=fillColor??color、边界=color；circle 层填充=fillColor??color、描边=color。 */
+ *  fill 层填充=fillColor??color、边界=color；circle 层填充=fillColor??color、描边=color。
+ *  带 thematic 时填充走数据驱动表达式（见 thematicPaint）。 */
 export function makeRenderLayer(id: string, srcId: string, kind: RenderKind, style: RenderStyle, filter?: FilterSpecification): LayerSpecification {
   const base = filter ? { filter } : {}
   if (kind === 'fill') {
-    return { ...base, id, type: 'fill', source: srcId, paint: { 'fill-color': style.fillColor ?? style.color, 'fill-opacity': 0.45, 'fill-outline-color': style.color } }
+    return { ...base, id, type: 'fill', source: srcId, paint: { 'fill-color': fillPaintOf(style) as never, 'fill-opacity': 0.45, 'fill-outline-color': style.color } }
   }
   if (kind === 'line') {
-    return { ...base, id, type: 'line', source: srcId, paint: { 'line-color': style.color, 'line-width': 2 } }
+    return { ...base, id, type: 'line', source: srcId, paint: { 'line-color': (style.thematic ? thematicPaint(style.thematic) : style.color) as never, 'line-width': 2 } }
   }
   return { ...base, id, type: 'circle', source: srcId, paint: {
-    'circle-color': style.fillColor ?? style.color,
+    'circle-color': fillPaintOf(style) as never,
     'circle-radius': style.pointRadius ?? 2,
     'circle-stroke-width': style.pointStrokeWidth ?? 1,
     'circle-stroke-color': style.color,

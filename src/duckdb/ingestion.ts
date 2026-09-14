@@ -11,7 +11,10 @@ import {
   duckTableFullBBox, geometryRowsToGeoJSON, quoteIdent, rowsToGeoJSON,
 } from './geometry.js'
 import { geomFamiliesOf, geomFamiliesOfWkb, geometrySampleRows, type GeomFamily } from './sampling.js'
-import { friendlyDuckError } from './geometry.js'
+import {
+  crsRangeWarning, crsReport, friendlyDuckError, type SourceCrsInfo,
+} from './geometry.js'
+import { bbox as turfBbox } from '@turf/bbox'
 import { DECK_FROM } from '../render-policy.js'
 
 /** loadCsvSourceData 的产出：CSV → 图层显示的抽样/全量 geojson + 可选 duck 句柄。 */
@@ -55,8 +58,9 @@ export async function loadCsvSourceData(engine: DuckDbEngine, sourcePath: string
         throw new Error('CSV 几何列上图需要 DuckDB spatial 扩展（首次需联网 INSTALL spatial，之后本地缓存）')
       }
       let sourceCrs: string | null = null
+      let crsInfo: SourceCrsInfo | null = null
       if (geomFormat === 'geometry') {
-        const crsInfo = await engine.detectSourceCrs(table, geomCol.name)
+        crsInfo = await engine.detectSourceCrs(table, geomCol.name)
         if (crsInfo.mixed) {
           await engine.dropTable(table).catch(() => {})
           throw new Error(
@@ -80,10 +84,14 @@ export async function loadCsvSourceData(engine: DuckDbEngine, sourcePath: string
         )
         duckTable = table
       }
-      const crsPart = sourceCrs && sourceCrs !== 'EPSG:4326' ? `，几何列已从 ${sourceCrs} 转 4326` : ''
       const fullBbox = duckTable
         ? await duckTableFullBBox(engine, duckTable, { geom: { column: geomCol.name, format: geomFormat, sourceCrs } })
         : undefined
+      // 坐标系与范围自检：**小文件也要说** —— 投影数据当经纬度用，小文件同样会落错位置。
+      const crsLine = crsInfo ? `；几何列 ${geomCol.name}：${crsReport(crsInfo)}` : ''
+      const rangeWarn = crsInfo
+        ? crsRangeWarning(fullBbox ?? (turfBbox(geojson as never) as unknown as number[]), crsInfo.status)
+        : ''
       return {
         totalCount: info.count,
         geojson,
@@ -92,7 +100,8 @@ export async function loadCsvSourceData(engine: DuckDbEngine, sourcePath: string
         ...(duckTable ? { fullBbox } : {}),
         families: families.length > 1 ? families : undefined,
         small,
-        note: small ? '' : `（共 ${info.count} 行，抽样上图 ${geojson.features.length} 行${crsPart}）`,
+        note: (small ? '' : `（共 ${info.count} 行，抽样上图 ${geojson.features.length} 行）`)
+          + crsLine + (rangeWarn ? `\n${rangeWarn}` : ''),
       }
     }
     const lon = coords.lon
@@ -172,8 +181,11 @@ export async function loadVectorSourceData(
   const attrs = created.columns.filter((c) => c !== geomName && c !== DUCK_RID)
   try {
     let sourceCrs = typeof opts.sourceCrs === 'string' && opts.sourceCrs ? opts.sourceCrs : null
+    // 用户显式指定 = 已声明；自动探测的结论（含"是假设还是事实"）要一路带到给模型看的话里。
+    let crsInfo: SourceCrsInfo =
+      sourceCrs != null ? { crs: sourceCrs, mixed: false, srids: [], status: 'declared' } : { crs: null, mixed: false, srids: [], status: 'assumed-undefined' }
     if (sourceCrs == null && geomFormat === 'geometry') {
-      const crsInfo = await engine.detectSourceCrs(table, geomName)
+      crsInfo = await engine.detectSourceCrs(table, geomName)
       if (crsInfo.mixed) {
         await engine.dropTable(table).catch(() => {})
         throw new Error(
@@ -203,10 +215,14 @@ export async function loadVectorSourceData(
       )
       duckTable = table
     }
-    const crsPart = sourceCrs && sourceCrs !== 'EPSG:4326' ? `，几何已从 ${sourceCrs} 转 4326` : ''
     const fullBbox = duckTable
       ? await duckTableFullBBox(engine, duckTable, { geom: { column: geomName, format: geomFormat, sourceCrs } })
       : undefined
+    const crsLine = `；几何列 ${geomName}：${crsReport(crsInfo)}`
+    const rangeWarn = crsRangeWarning(
+      fullBbox ?? (turfBbox(geojson as never) as unknown as number[]),
+      crsInfo.status,
+    )
     return {
       totalCount: created.count,
       geojson,
@@ -215,7 +231,8 @@ export async function loadVectorSourceData(
       ...(duckTable ? { fullBbox } : {}),
       ...(families && families.length > 1 ? { families } : {}),
       small,
-      note: small ? '' : `（共 ${created.count} 行，抽样上图 ${geojson.features.length} 行${crsPart}）`,
+      note: (small ? '' : `（共 ${created.count} 行，抽样上图 ${geojson.features.length} 行）`)
+        + crsLine + (rangeWarn ? `\n${rangeWarn}` : ''),
     }
   } catch (err) {
     await engine.dropTable(table).catch(() => {})

@@ -34,7 +34,7 @@ import { isScalar, scalarRows, featureTitle, fmtCell, makeAttrTable, buildPopupC
 import { queryFeatures, collectCoords, captureMapScreenshot, drawPin, fitToGeoJSON, clearPick, recordPick } from './map-pick.js'
 import type { ScreenshotPayload } from './map-pick.js'
 import { renderKinds, makeRenderLayer, darkenHex, maxDensityOf, hexHeightFor, makeHeatLayer, makeHexLayer, CLUSTER_BASE_RADIUS, shadeColor, clusterColorFor, clusterRadius, makeClusterLayer, makeClusterCountLayer, LAYER_KINDS, ALL_RENDER_SUFFIXES, RENDER_ROW_KEY, RENDER_LAYER_KEY, DECK_MODES, SRC, RID, SRC_HEX, layerShapeKey } from './map-render-spec.js'
-import type { RenderKind, RenderStyle } from './map-render-spec.js'
+import { thematicPaint, type RenderKind, type RenderStyle } from './map-render-spec.js'
 
 /** 同步器所需的组件绑定（均为 MapView 里的 ref/回调，保持引用稳定）。 */
 export interface LayerSyncHost {
@@ -103,7 +103,7 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
               // maplibre circle 层会给 LineString/Polygon 的每个顶点画圆（表现为散点），必须按几何渲染。
               // 注意：切底图 setStyle 后 data-points 层可能尚未重建，所有 setLayout/setPaint 调用先判存在，避免抛错中断整轮。
               const dmode: DisplayMode = s.mode ?? 'points'
-              const dstyle = JSON.stringify({ r: s.pointRadius, sw: s.pointStrokeWidth, fc: s.fillColor })
+              const dstyle = JSON.stringify({ r: s.pointRadius, sw: s.pointStrokeWidth, fc: s.fillColor, th: s.thematic ?? null })
               const isPointData = (s.geometryTypes ?? []).length > 0
                 && (s.geometryTypes ?? []).every((t) => t === 'Point' || t === 'MultiPoint')
               // data-points 圆点只服务「maplibre 渲染的点数据集」；renderer=deck（>10 万，走 arrow 大数据）的点/线/面
@@ -114,7 +114,7 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
                   map.setLayoutProperty('data-points', 'visibility', s.visible ? 'visible' : 'none')
                   // 数据集点样式跟随图层（颜色 + 点位大小 + 描边），此前 data-points 写死蓝色、半径 5
                   if (prev?.color !== s.color || prev?.style !== dstyle) {
-                    map.setPaintProperty('data-points', 'circle-color', s.fillColor ?? s.color)
+                    map.setPaintProperty('data-points', 'circle-color', (s.thematic ? thematicPaint(s.thematic) : (s.fillColor ?? s.color)) as never)
                     map.setPaintProperty('data-points', 'circle-radius', s.pointRadius ?? 2)
                     map.setPaintProperty('data-points', 'circle-stroke-width', s.pointStrokeWidth ?? 1)
                     map.setPaintProperty('data-points', 'circle-stroke-color', s.color)
@@ -136,7 +136,7 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
               if (map.getLayer('data-points')) {
                 map.setLayoutProperty('data-points', 'visibility', 'none')
                 if (prev?.color !== s.color || prev?.style !== dstyle) {
-                  map.setPaintProperty('data-points', 'circle-color', s.fillColor ?? s.color)
+                  map.setPaintProperty('data-points', 'circle-color', (s.thematic ? thematicPaint(s.thematic) : (s.fillColor ?? s.color)) as never)
                   map.setPaintProperty('data-points', 'circle-radius', s.pointRadius ?? 2)
                   map.setPaintProperty('data-points', 'circle-stroke-width', s.pointStrokeWidth ?? 1)
                   map.setPaintProperty('data-points', 'circle-stroke-color', s.color)
@@ -156,9 +156,9 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
             const paramsChanged = force || (!!prev && prev.params !== (s.modeParams ? JSON.stringify(s.modeParams) : ''))
             const colorChanged = force || (!!prev && prev.color !== s.color)
             // 样式（点位大小/描边/填充色）变更也要触发重建
-            const styleKey = JSON.stringify({ r: s.pointRadius, sw: s.pointStrokeWidth, fc: s.fillColor })
+            const styleKey = JSON.stringify({ r: s.pointRadius, sw: s.pointStrokeWidth, fc: s.fillColor, th: s.thematic ?? null })
             const styleChanged = force || (!!prev && prev.style !== styleKey)
-            const style: RenderStyle = { color: s.color, pointRadius: s.pointRadius, pointStrokeWidth: s.pointStrokeWidth, fillColor: s.fillColor }
+            const style: RenderStyle = { color: s.color, pointRadius: s.pointRadius, pointStrokeWidth: s.pointStrokeWidth, fillColor: s.fillColor, thematic: s.thematic }
             // >10 万点图层走「deck 原始数据」路径（host renderer=deck；mode 为原始点时适用，plane/hex 仍走 maplibre）。
             const isRawDeck = s.renderer === 'deck' && mode === 'points'
             // deck 懒加载：首个「需 deck 渲染」的图层（deck 出图 / raw 原始数据路径）出现时才拉 deck.js 建 controller。

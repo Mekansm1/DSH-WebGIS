@@ -40,6 +40,9 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
     name: 'webgis_spatial_filter',
     description:
       '在持有 DuckDB 内存表的图层上做「全表空间筛选」→ 新图层或统计（DuckDB 管大表谓词，Turf 只管筛小后的探索）。'
+      + '⚠ 与本工具易混的：**已筛小的普通图层**按位置筛选用 webgis_select_by_location（Turf，在显示子集上算）；'
+      + '按属性等值筛选大图层用 webgis_filter_layer（where）；**几何列图层上 webgis_filter_layer 不支持 polygon/radius 围栏**（那边会报「暂不支持」），围栏筛选一律走本工具。'
+      + '判断图层大小看 webgis_list_layers 的 materialized/totalCount：materialized=false 就是「地图上只是抽样」，别用 Turf 类工具下全量结论。'
       + '只对含内存表（duckTable）的图层可用，不限来源：既支持 webgis_load_csv 的经纬度点列（duckCoords），'
       + '也支持几何列图层（duckGeom，format geometry/wkb/wkt，sourceCrs 非 4326 自动转 4326）。'
       + 'mode：bbox=经纬度范围（仅点状源）；dwithin=center:{lon,lat}+distanceMeters 半径筛选'

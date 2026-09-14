@@ -29,7 +29,13 @@ import { duckGeomFamiliesOf, geomFamiliesOf, geomFamiliesOfWkb, geometrySampleRo
 import { csvLoadError, loadCsvSourceData, loadVectorSourceData } from '../ingestion.js'
 import { toCsv, toGeoJSON } from '../../geo-export.js'
 import { effectiveCluster, resolveClusterMode, validateSql, type ClusterParam } from '../../postgis.js'
-import { detectCoordColumns, detectGeomColumn, detectGeomFormat } from '../geometry.js'
+import {
+  crsRangeWarning, crsReport, detectCoordColumns, detectGeomColumn, detectGeomFormat, type SourceCrsInfo,
+} from '../geometry.js'
+import { bbox as turfBbox } from '@turf/bbox'
+
+/** FeatureCollection 的 bbox（坐标范围自检用）。 */
+const bboxOf = (fc: FeatureCollection): number[] => turfBbox(fc as never) as unknown as number[]
 import type { DuckGeomSource } from '../types.js'
 import { DECK_FROM } from '../../render-policy.js'
 
@@ -39,7 +45,9 @@ export function registerLoadCsvTool(ctx: Context, deps: DuckToolDeps): void {
   ctx.tools.register(defineTool({
     name: 'webgis_load_csv',
     description:
-      '把本地 CSV 经 DuckDB 建表后上地图（分析型入口）。大文件（默认超 5 万行）经 DuckDB 内存表秒级建表：自动识别经纬度列'
+      '【加载 CSV 一律用本工具】把本地 CSV 经 DuckDB 建表后上地图（分析型入口）。'
+      + '⚠ 用户说「加载/导入 CSV」时用它，**不要用 webgis_load_dataset**（那条是 GeoJSON / shapefile 的主路径，且不保留可再筛选的内存表）。'
+      + '大文件（默认超 5 万行）经 DuckDB 内存表秒级建表：自动识别经纬度列'
       + '（lon/lat、longitude/latitude、lng/lat、lon_wgs84/lat_wgs84、lon_/lat_ 前缀），识别失败可显式传 lonField/latField。'
       + 'path 为本地绝对路径，支持 *.csv 通配符合并同结构多文件。'
       + '≤5 万行小文件全部物化上图（常规加载，不占 DuckDB 内存）；大文件抽样显示并开启聚合（supercluster），'
@@ -162,17 +170,21 @@ export function registerLoadCsvTool(ctx: Context, deps: DuckToolDeps): void {
         }
         // CRS：显式 sourceCrs 优先；GEOMETRY 列自动探测（混合 SRID 拒绝自动整列重投影，提示显式指定）。
         let sourceCrs: string | null = sourceCrsArg ?? null
+        // 检出结论（含"是假设还是事实"）要一路带到给模型看的话里 —— 见 geometry.crsReport。
+        let crsInfo: SourceCrsInfo | null =
+          sourceCrsArg !== undefined ? { crs: sourceCrsArg, mixed: false, srids: [], status: 'declared' } : null
         if (sourceCrsArg === undefined && geomFormat === 'geometry') {
-          const crsInfo = await engine.detectSourceCrs(table, geomCol.name)
-          if (crsInfo.mixed) {
+          const detected = await engine.detectSourceCrs(table, geomCol.name)
+          if (detected.mixed) {
             await engine.dropTable(table).catch(() => {})
             return {
               ok: false,
-              message: `CSV 几何列 ${geomCol.name} 含多个 SRID（${crsInfo.srids.join(', ')}）：不自动整列重投影，`
+              message: `CSV 几何列 ${geomCol.name} 含多个 SRID（${detected.srids.join(', ')}）：不自动整列重投影，`
                 + '请显式传 sourceCrs 或先清洗数据。',
             }
           }
-          sourceCrs = crsInfo.crs
+          crsInfo = detected
+          sourceCrs = detected.crs
         }
         const attrs = info.columns.filter((c) => c !== geomCol.name && c !== DUCK_RID)
         const selList = [...attrs.map((c) => quoteIdent(c)), buildGeomSelect(geomCol.name, geomFormat, sourceCrs)].join(', ')
@@ -209,7 +221,11 @@ export function registerLoadCsvTool(ctx: Context, deps: DuckToolDeps): void {
           await engine.dropTable(table).catch(() => {})
           return { ok: false, message: `筛选/物化失败: ${friendlyDuckError(err)}` }
         }
-        const crsNote = sourceCrs && sourceCrs !== 'EPSG:4326' ? `（几何列 ${geomCol.name} 已从 ${sourceCrs} 转 4326）` : ''
+        // 坐标系必须**每次都说**：crs=null 有三种成因（已声明 4326 / 未声明 / 探不出来），
+        // 后两种只是"假设按 WGS84 解释"，不说出来模型就会把假设当事实用。见 geometry.crsReport。
+        const crsLine = crsInfo ? `；${crsReport(crsInfo)}` : ''
+        // 范围自检：坐标越界 ≈ 投影坐标被当经纬度用了（最危险的一类静默错误）。
+        const rangeWarn = crsInfo ? crsRangeWarning(bboxOf(fc), crsInfo.status) : ''
         const push = await pushResult(`CSV - ${base}`, fc, {
           cluster: false,
           duckTable,
@@ -222,10 +238,10 @@ export function registerLoadCsvTool(ctx: Context, deps: DuckToolDeps): void {
           status: small ? 'small' : 'loaded',
           totalCount: info.count,
           table: duckTable ?? '',
-          message: small
-            ? `${push.message}（共 ${info.count} 行全部上图；几何列 ${geomCol.name}${crsNote}）`
-            : `${push.message}（共 ${info.count} 行，抽样上图 ${fc.features.length} 行；几何列 ${geomCol.name}${crsNote}；`
-              + `DuckDB 内存表 ${duckTable} 已建，可继续筛选）`,
+          message: (small
+            ? `${push.message}（共 ${info.count} 行全部上图；几何列 ${geomCol.name}${crsLine}）`
+            : `${push.message}（共 ${info.count} 行，抽样上图 ${fc.features.length} 行；几何列 ${geomCol.name}${crsLine}；`
+              + `DuckDB 内存表 ${duckTable} 已建，可继续筛选）`) + (rangeWarn ? `\n${rangeWarn}` : ''),
         }
       }
 

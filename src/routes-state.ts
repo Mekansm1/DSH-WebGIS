@@ -10,7 +10,7 @@ import {
   buildGeomExpr, DUCK_RID, getDuckDb, normalizeValue, quoteIdent,
   type ArrowBbox,
 } from './duckdb.js'
-import { pointsToGeoArrowFromIpc, pointsToGeoArrowTable, tableToIpc, wkbRowsToGeoArrowTable } from './geoarrow.js'
+import { pointCoordinatesToGeoArrowTable, pointsToGeoArrowFromIpc, pointsToGeoArrowTable, tableToIpc, wkbRowsToGeoArrowTable } from './geoarrow.js'
 import { arrowCacheGet, arrowCacheSet } from './arrow-cache.js'
 import type { RouteApi, RouteHandler } from './route-shared.js'
 
@@ -141,7 +141,8 @@ export const handleLayerRow: RouteHandler = (_req, res, url, _pathname, _session
 
 export const handleArrow: RouteHandler = (req, res, url, _pathname, sessionId, state) => {
   // 大文件点图层 → GeoArrow IPC 二进制（deck.gl 原始点渲染的传输路径；只有带 duckTable 的图层有）。
-  // 点图层：engine 拉全表 → 直接拼 interleaved Point 表（免 spatial）；几何图层：ST_AsWKB → objex-utils。
+  // duckCoords 点层：engine 按 chunk 列式读取 → interleaved Point 表（免 spatial、免百万 JS 行对象）；
+  // duckGeom 线/面：ST_AsWKB → objex-utils。
   // 视口裁剪（高 zoom）：客户端带 bbox=west,south,east,north 时，先按视野过滤再取 max cap——
   // 高 zoom 不再无差别抽全表（60 万），只拉「当前视野内」再套上限抽样（见 arrowViewportWhere）。
   return void (async () => {
@@ -178,9 +179,8 @@ export const handleArrow: RouteHandler = (req, res, url, _pathname, sessionId, s
           const sel = `${quoteIdent(layer.duckCoords.lon)}, ${quoteIdent(layer.duckCoords.lat)}`
           const where = bbox ? arrowViewportWhere({ coords: layer.duckCoords }, bbox) : null
           const from = arrowFrom(where)
-          // 原生 Arrow IPC 只在无 bbox 路径用：arrow 扩展的 arrowIPCAll 对「空结果」会让 duckdb 原生段崩溃
-          // （实测 SELECT ... WHERE 恒假 → 进程 EXIT 127 无 JS 错误），而视野裁剪常见空窗（视野内无要素），
-          // 必须先避开。bbox 视野子集通常远小于全表，走 JS 行路径（只取 lon/lat 两列）足够。
+          // Node Neo 暂未提供 Arrow IPC 导出，engine.arrowIpc 当前返回 null；这里保留无 bbox 的
+          // 快路径接口，待驱动补齐后可恢复。bbox 视野子集通常远小于全表，JS 行路径只取 lon/lat 两列。
           if (!bbox) {
             const native = await engine.arrowIpc(`SELECT ${sel} FROM ${from}`)
             if (native) {
@@ -189,9 +189,15 @@ export const handleArrow: RouteHandler = (req, res, url, _pathname, sessionId, s
             }
           }
           if (!bytes) {
-            const rows = await engine.run(`SELECT ${sel} FROM ${from}`)
-            // 视野内无点 / 全表空 → rows=[]，pointsToGeoArrowTable 产出合法空 arrow（0 行）。
-            bytes = tableToIpc(pointsToGeoArrowTable(rows, layer.duckCoords.lon, layer.duckCoords.lat, []))
+            // Node Neo 以约 2048 行 chunk 流式读取两列，直接写入 Float64Array；避免百万个
+            // `{lon, lat}` 对象的分配与 GC。若驱动列式读取异常，再降级到既有行对象路径。
+            try {
+              const positions = await engine.readPointCoordinates(`SELECT ${sel} FROM ${from}`)
+              bytes = tableToIpc(pointCoordinatesToGeoArrowTable(positions))
+            } catch {
+              const rows = await engine.run(`SELECT ${sel} FROM ${from}`)
+              bytes = tableToIpc(pointsToGeoArrowTable(rows, layer.duckCoords.lon, layer.duckCoords.lat, []))
+            }
           }
         } else if (layer.duckGeom) {
           if (!(await engine.ensureSpatial())) {
@@ -270,7 +276,7 @@ export const handleArrowAttr: RouteHandler = (req, res, url, _pathname, _session
       const qlon = quoteIdent(layer.duckCoords.lon)
       const qlat = quoteIdent(layer.duckCoords.lat)
       // 1) 精确匹配：箭头链路与查询读同一 duck 列，同一 DOUBLE 值，等值应命中。
-      //    lon/lat 已通过 Number.isFinite 校验，内联为数字字面量（duckdb 1.4.4 的 conn.all params 绑定有 bug，项目统一内联）。
+      //    lon/lat 已通过 Number.isFinite 校验，内联为数值字面量，避免动态列名与参数绑定混用。
       let rows = await engine.run(
         `SELECT * FROM ${layer.duckTable} WHERE ${qlon} = ${lon} AND ${qlat} = ${lat} LIMIT 1`,
       )

@@ -18,7 +18,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // 过去这条增补靠 dsh-agent 的传递依赖被顺带加载，依赖树收敛后必须显式引入。
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { createGeoToolRuntime } from './geo-tools-runtime.js'
-import type { GeoRegistryState, LayerLifecycleHooks } from './geo-tools-runtime.js'
+import type { GeoRegistryState, GeoToolDeps, LayerLifecycleHooks } from './geo-tools-runtime.js'
 import { registerConstructTools } from './geo-construct-tools.js'
 import { registerOverlayTools } from './geo-overlay-tools.js'
 import { registerQueryTools } from './geo-query-tools.js'
@@ -36,6 +36,7 @@ export function registerGeoTools(
   ctx: Context,
   stateFor: (sessionId: string | undefined) => GeoRegistryState,
   hooks?: LayerLifecycleHooks,
+  deps?: GeoToolDeps,
 ): void {
   // #6 工具约束纪律：注册为全局系统提示段（order 150 ∈ 工具引导 100–199），所有 agent 组装提示词时都带上。
   // 插件级 ctx 作用域 → 全局生效；防 AI 幻觉工具名、假装执行、以及"尝试-失败-再尝试"死循环。
@@ -59,10 +60,14 @@ export function registerGeoTools(
       '9. 面向用户的回复用日常 GIS 语言，不暴露内部技术名词：不要把 duckdb / maplibre / deck.gl / GeoArrow / spatial 扩展 / 内存表 / 引擎 / 图层内部 id（如 csv_1、duckdb_2、result_3、ds_0）/ 列名 / __rid 等术语讲给用户。'
         + '只告诉用户结果与动作：命中多少要素、落在哪个区域/距离范围、生成了什么内容的新图层；'
         + '工具返回或错误里出现这些技术词时，用用户能懂的话转述（如把「在 DuckDB 表 csv_1 上命中 1234 行」说成「在你这层数据里找到 1234 个」），不要原样照读技术字眼。',
-      '10. 对「含内存表的大图层」（要素远多于地图上已显示的抽样）做全量筛选/统计/空间谓词时，必须用**在 duck 全表上跑的**工具：'
-        + '属性等值筛选用 webgis_filter_layer（where）、全量统计用 webgis_layer_stats、空间/范围用 webgis_spatial_filter、复杂用 webgis_sql_layer——shp/geojson 大层与 csv 一样都有完整 duck 表与属性列。'
-        + 'Turf/geojson 类工具（select_by_value/buffer/spatial_join 等）只用于已筛小的子集。'
-        + '禁止把「地图上显示的抽样/可视部分」当成全量结论向用户汇报，先想清楚用户要的是全量还是当前视野。',
+      '10. 先认清「大图层」：webgis_list_layers 里 **materialized=false** 的图层，地图上显示的只是抽样，'
+        + '真数据在内存表里，**totalCount 才是真实行数**（featureCount 只是当前显示了多少）。这类图层上：'
+        + '① 按属性筛选（等值/包含/大于…）**直接用 webgis_select_by_value 就行，它会自动改到全表上跑**，不必先换工具；'
+        + '② 要「全表有多少 / 均值多少」用 webgis_layer_stats（webgis_feature_summary 只统计图上抽样，值会偏）；'
+        + '③ 空间范围/围栏谓词用 webgis_spatial_filter，复杂查询用 webgis_sql_layer，等值筛选用 webgis_filter_layer；'
+        + '④ 会**改变要素本身**的操作（buffer/dissolve/clip/相交/重投影/写属性/加字段/属性连接/泰森多边形等）在这类图层上**会被拒绝**——'
+        + '先按①②筛/裁出要处理的子集，再对子集做这些操作。shp/geojson 大层与 csv 一样都有完整内存表与属性列。'
+        + '禁止把「地图上显示的抽样/可视部分」当成全量结论向用户汇报：说「一共有多少」用 totalCount，说「图上有多少」才用 featureCount。',
       '11. 语言跟随：回复（包括对用户可见的推理/思考过程）一律使用「用户输入所用的语言」：中文问→中文答；英文问→英文答；除非用户明确要求，不得擅自切换语言或中英混排。',
     ].join('\n'),
   }
@@ -78,7 +83,7 @@ export function registerGeoTools(
   }
 
   // 共享运行时：sess/pushResult/applyMode/applyStyle/COMMON/MODE_*/REMINDER/schema/text/RESULT_COLORS/hooks。
-  const rt = createGeoToolRuntime(stateFor, hooks)
+  const rt = createGeoToolRuntime(stateFor, hooks, deps)
 
   // ---- 七个功能域（注册顺序与拆分前 registerGeoTools 大函数内一致）----
   registerConstructTools(ctx, rt)

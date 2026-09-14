@@ -75,6 +75,24 @@ export function pointsToGeoArrowTable(
   return new Table(new RecordBatch(schema, structData))
 }
 
+/**
+ * 已校验的 interleaved lon/lat Float64Array → GeoArrow Point 表。
+ * 大 DuckDB 点图层的列式分块读取直接调用此函数，避免先构造百万个 JS 行对象。
+ */
+export function pointCoordinatesToGeoArrowTable(positions: Float64Array): Table {
+  const n = Math.floor(positions.length / 2)
+  const xyType = new FixedSizeList(2, new Field('xy', new Float64()))
+  const geomData = makeData({
+    type: xyType,
+    length: n,
+    child: makeData({ type: new Float64(), data: positions.subarray(0, n * 2) }),
+  })
+  const geomField = new Field(GEOMETRY_COL, xyType, true, POINT_EXT)
+  const schema = new Schema([geomField])
+  const structData = makeData({ type: new Struct([geomField]), length: n, children: [geomData] })
+  return new Table(new RecordBatch(schema, structData))
+}
+
 /** 属性列 → Field + Data（数值→Float64，否则 Utf8 字符串）。 */
 function attrData(name: string, values: unknown[]): { field: Field; data: Data } {
   const allNumeric = values.every((v) => v == null || typeof v === 'number' || typeof v === 'bigint')
@@ -136,7 +154,7 @@ export function tableToIpc(table: Table): Uint8Array {
 
 /**
  * 从「DuckDB 原生 Arrow IPC（两列 DOUBLE lon/lat）」直构 GeoArrow Point 表（无属性列）。
- * 绕开 conn.all 的 JS 行对象物化：DuckDB arrowIPC 出来的 buffer 直接 decode → 类型化读列 → 拼点表。
+ * 为 Node Neo 将来的 Arrow IPC 快路径保留；当前引擎会回退到 JS 行转换。
  * 非法/越界/空值行跳过（与 pointsToGeoArrowTable 同一校验）。无有效点返回 null。
  */
 export function pointsToGeoArrowFromIpc(ipc: Uint8Array, lonCol: string, latCol: string): Table | null {

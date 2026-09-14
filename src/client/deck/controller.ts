@@ -321,6 +321,8 @@ export class DeckController {
       color: s.fillColor ?? s.color,
       visible: s.visible,
       radius: s.pointRadius,
+      // 专题配色：断点与颜色由 host 算好，这里只把配置带给图层构造（见 thematicLut）。
+      ...(s.thematic ? { thematic: s.thematic } : {}),
       earcutWorkerUrl: sessionUrl(this.host.getSessionId(), '/webgis/earcut-worker.js'),
     }
   }

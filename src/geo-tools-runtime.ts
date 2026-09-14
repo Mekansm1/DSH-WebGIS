@@ -9,6 +9,7 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { BBox, FeatureCollection } from 'geojson'
 import type { DisplayMode, GisLayer, ModeParams } from './geo-processing.js'
+import type { ThematicSpec } from './thematic.js'
 import { RESULT_COLORS, makeResultLayer, requireLayer } from './geo-processing.js'
 import { normalizeColor } from './postgis.js'
 import type { BasemapExportParams, BasemapExportResult } from './session-state.js'
@@ -38,6 +39,15 @@ export interface PushResultOutput {
   message: string
 }
 
+/**
+ * 结果图层的附加承载属性：结果仍留在 DuckDB 全表时（如全表属性筛选）要把内存表句柄
+ * 一并挂到新图层上，否则新图层会退化成"只有上图抽样"、不能继续链式筛选/全量统计。
+ */
+export type ResultLayerExtra = Pick<
+  Parameters<typeof makeResultLayer>[0],
+  'duckTable' | 'duckCoords' | 'duckGeom' | 'totalCount' | 'families' | 'fullBbox'
+>
+
 /** 对一个会话产出结果图层的函数（opLabel 拼图层名，geojson 归一化后 append 到该会话注册表）。 */
 type PushResultFn = (
   opLabel: string,
@@ -45,6 +55,7 @@ type PushResultFn = (
   inputLabel: string,
   mode?: DisplayMode,
   modeParams?: ModeParams,
+  extra?: ResultLayerExtra,
 ) => PushResultOutput
 
 /** 工具 execute 的 exec 形参里本层只依赖 agent.id。 */
@@ -102,7 +113,7 @@ export function text(content: string): ContentBlock[] {
   return [{ type: 'text', text: content }]
 }
 
-export const COMMON = '作用于当前 GIS 图层。图层 id 通过 webgis_list_layers 获取；基础数据集 id 为 dataset；结果图层 id 为 result_<n>，可链式调用（如先 buffer 再 clip）。'
+export const COMMON = '作用于当前 GIS 图层。图层 id 一律以 webgis_list_layers 返回为准（配置里的基础数据集=dataset；加载与工具产物形如 ds_<n>、csv_<n>、db_<n>、import_<n>、result_<n>）。'
 
 /** 展示方式中文名。points/plane/hex=maplibre 原生；arc/trips/wall/radial=deck.gl 出图。 */
 export const MODE_LABEL: Record<DisplayMode, string> = {
@@ -143,13 +154,22 @@ export function applyMode(layer: GisLayer, mode: DisplayMode, params?: ModeParam
 /** 共享的图层样式修改：原地改 color / pointRadius / pointStrokeWidth / fillColor，不 bump rev（纯展示变更）。返回错误消息或 null。 */
 export function applyStyle(
   layer: GisLayer,
-  patch: { color?: string; pointRadius?: number; pointStrokeWidth?: number; fillColor?: string },
+  patch: {
+    color?: string
+    pointRadius?: number
+    pointStrokeWidth?: number
+    fillColor?: string
+    /** 专题配色：传对象=开启；传 null=关闭。 */
+    thematic?: ThematicSpec | null
+  },
 ): string | null {
-  const { color, pointRadius, pointStrokeWidth, fillColor } = patch
+  const { color, pointRadius, pointStrokeWidth, fillColor, thematic } = patch
   if (color !== undefined) {
     const c = normalizeColor(color)
     if (!c) return '无法识别的颜色，请用十六进制 #rrggbb/#rgb 或颜色名（如 red / orange / 蓝）'
     layer.color = c
+    // ⚠ 专题配色会覆盖单色填充：不在这里清掉的话，用户要「改成红色」会看不到任何变化。
+    delete layer.thematic
   }
   if (pointRadius !== undefined) {
     if (!Number.isFinite(pointRadius) || pointRadius <= 0 || pointRadius > 100) {
@@ -167,6 +187,11 @@ export function applyStyle(
     const c = normalizeColor(fillColor)
     if (!c) return '无法识别的填充颜色，请用十六进制 #rrggbb/#rgb 或颜色名'
     layer.fillColor = c
+    delete layer.thematic
+  }
+  if (thematic !== undefined) {
+    if (thematic === null) delete layer.thematic
+    else layer.thematic = thematic
   }
   return null
 }
@@ -183,6 +208,7 @@ function pushResultTo(
   inputLabel: string,
   mode?: DisplayMode,
   modeParams?: ModeParams,
+  extra?: ResultLayerExtra,
 ): PushResultOutput {
   const id = `result_${++resultSeq}`
   const layer = makeResultLayer({
@@ -193,6 +219,7 @@ function pushResultTo(
     color: RESULT_COLORS[resultSeq % RESULT_COLORS.length] ?? '#3b82f6',
     ...(mode ? { mode } : {}),
     ...(modeParams && Object.keys(modeParams).length > 0 ? { modeParams } : {}),
+    ...extra,
   })
   st.layers = [...getLayers(), layer]
   return {
@@ -203,6 +230,32 @@ function pushResultTo(
     bbox: layer.bbox,
     message: `${opLabel}完成：生成图层 ${id}（${layer.featureCount} 个要素）`,
   }
+}
+
+/** 全表属性筛选的产出（duckdb 域实现，见 duckdb/attr-filter.ts 的 duckAttrFilter）。 */
+export interface FullTableAttrFilterOk {
+  ok: true
+  /** 全表命中行数。 */
+  count: number
+  /** 结果内存表名（挂到新图层，可继续链式筛选）。 */
+  table: string
+  geojson: FeatureCollection
+  /** 「命中 N 行，上图 M 行」（与 webgis_filter_layer 同口径文案）。 */
+  message: string
+  extra: ResultLayerExtra
+}
+
+export type FullTableAttrFilter = (
+  layer: GisLayer,
+  field: string,
+  operator: string,
+  value: string | undefined,
+) => Promise<FullTableAttrFilterOk | { ok: false; message: string }>
+
+/** 域工具注册所需的 host 注入依赖（可选；缺省时相关能力自动退回原路线）。 */
+export interface GeoToolDeps {
+  /** 大图层属性筛选下推到 DuckDB 全表。 */
+  attrFilterFullTable?: FullTableAttrFilter
 }
 
 /** 域工具注册函数共享的运行时面（见 createGeoToolRuntime）。 */
@@ -217,15 +270,28 @@ export interface GeoToolRuntime {
     inputLabel: string,
     mode?: DisplayMode,
     modeParams?: ModeParams,
+    extra?: ResultLayerExtra,
   ) => PushResultOutput
+  /**
+   * 大图层属性筛选下推（host 注入；turf 域拿不到 DuckDB 引擎）。存在且图层有内存表时，
+   * 按属性筛选类工具应改道到这里跑全表，而不是在 geojson 抽样上静默算错。
+   * 未注入（单测/裁剪部署）时返回 undefined，调用方退回原 Turf 路线。
+   */
+  attrFilterFullTable?: FullTableAttrFilter
   /** host 侧钩子（图层生命周期 + 底图要素导出请求转发）。 */
   hooks: LayerLifecycleHooks | undefined
   /** 展示方式切换：校验几何兼容性后原地改 mode/modeParams，不 bump rev。 */
   applyMode: (layer: GisLayer, mode: DisplayMode, params?: ModeParams) => string | null
-  /** 图层样式修改：原地改 color/pointRadius/pointStrokeWidth/fillColor，不 bump rev。 */
+  /** 图层样式修改：原地改 color/pointRadius/pointStrokeWidth/fillColor/thematic，不 bump rev。 */
   applyStyle: (
     layer: GisLayer,
-    patch: { color?: string; pointRadius?: number; pointStrokeWidth?: number; fillColor?: string },
+    patch: {
+      color?: string
+      pointRadius?: number
+      pointStrokeWidth?: number
+      fillColor?: string
+      thematic?: ThematicSpec | null
+    },
   ) => string | null
   COMMON: string
   MODE_LABEL: Record<DisplayMode, string>
@@ -245,6 +311,7 @@ export interface GeoToolRuntime {
 export function createGeoToolRuntime(
   stateFor: (sessionId: string | undefined) => GeoRegistryState,
   hooks?: LayerLifecycleHooks,
+  deps?: GeoToolDeps,
 ): GeoToolRuntime {
   const sess = (exec: ToolExec): GeoSession => {
     const st = stateFor(exec.agent?.id)
@@ -253,8 +320,8 @@ export function createGeoToolRuntime(
       const s = typeof id === 'string' ? id : ''
       return requireLayer(layers(), s)
     }
-    const pushResult: PushResultFn = (opLabel, geojson, inputLabel, mode?, modeParams?) =>
-      pushResultTo(st, layers, opLabel, geojson, inputLabel, mode, modeParams)
+    const pushResult: PushResultFn = (opLabel, geojson, inputLabel, mode?, modeParams?, extra?) =>
+      pushResultTo(st, layers, opLabel, geojson, inputLabel, mode, modeParams, extra)
     return { st, layers, resolve, pushResult }
   }
 
@@ -265,14 +332,16 @@ export function createGeoToolRuntime(
     inputLabel: string,
     mode?: DisplayMode,
     modeParams?: ModeParams,
+    extra?: ResultLayerExtra,
   ): PushResultOutput => {
     const st = stateFor(exec.agent?.id)
-    return pushResultTo(st, () => st.layers, opLabel, geojson, inputLabel, mode, modeParams)
+    return pushResultTo(st, () => st.layers, opLabel, geojson, inputLabel, mode, modeParams, extra)
   }
 
   return {
     sess,
     pushResult,
+    ...(deps?.attrFilterFullTable ? { attrFilterFullTable: deps.attrFilterFullTable } : {}),
     hooks,
     applyMode,
     applyStyle,

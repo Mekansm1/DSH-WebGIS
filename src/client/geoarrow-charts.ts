@@ -21,6 +21,7 @@ import type { Layer } from '@deck.gl/core'
 import type { Table } from 'apache-arrow'
 import type { FeatureCollection } from 'geojson'
 import { geojsonFamilies, geometryKindOf, hexToRgb, rawLineData, rawPointData, rawPolygonData } from './geoarrow-utils.js'
+import { NO_DATA_COLOR, type ThematicSpec } from './gis-types.js'
 
 export interface GeoArrowSpec {
   id: string
@@ -30,11 +31,77 @@ export interface GeoArrowSpec {
   radius?: number
   /** 面图层 earcut worker URL（自托管 /webgis/earcut-worker.js；缺省 null = 主线程 earcut）。 */
   earcutWorkerUrl?: string | null
+  /** 专题配色：设置后每个要素按字段值取色，覆盖 color。 */
+  thematic?: ThematicSpec
+}
+
+/** #[rgb] / #rrggbb → [r,g,b]（失败回中性灰）。 */
+function rgbOf(hex: string): [number, number, number] {
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex).trim())
+  if (!m) return [156, 163, 175]
+  let h = m[1]!
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('')
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
+}
+
+/** 编译一份「属性值 → RGB」的判定器（LUT 与 geojson accessor 共用同一套规则）。 */
+export function compileThematic(spec: ThematicSpec): (raw: unknown) => [number, number, number] {
+  const rgbList = spec.colors.map(rgbOf)
+  const noData = rgbOf(NO_DATA_COLOR)
+  const byCat = new Map<string, [number, number, number]>()
+  if (spec.categories) spec.categories.forEach((c, i) => byCat.set(c, rgbList[i] ?? noData))
+  return (raw: unknown): [number, number, number] => {
+    if (raw == null || raw === '') return noData // 缺值单独一色，绝不落进任何一级
+    if (spec.categories) return byCat.get(String(raw)) ?? noData
+    const x = typeof raw === 'number' ? raw : Number(raw)
+    if (!Number.isFinite(x)) return noData
+    let idx = 0
+    while (idx < spec.breaks.length && x > spec.breaks[idx]!) idx++
+    return rgbList[idx] ?? noData
+  }
+}
+
+/**
+ * 专题配色 → 逐行颜色查找表（Uint8Array，每行 4 字节 RGBA）。
+ *
+ * 一次性预计算而非在 accessor 里逐帧判断：65 万行的 accessor 每帧都会跑，
+ * 在里面查断点/比字符串会拖垮帧率。字段不在 Arrow schema 里 → 返回 null，
+ * 调用方退回单色（**不要**静默画成灰，那会让人以为「全是缺值」）。
+ */
+export function thematicLut(table: Table, spec: ThematicSpec, alpha: number): Uint8Array | null {
+  const col = table.getChild(spec.field)
+  if (!col) return null
+  const n = table.numRows
+  const pick = compileThematic(spec)
+  const out = new Uint8Array(n * 4)
+  for (let i = 0; i < n; i++) {
+    const rgb = pick(col.get(i))
+    const o = i * 4
+    out[o] = rgb[0]; out[o + 1] = rgb[1]; out[o + 2] = rgb[2]; out[o + 3] = alpha
+  }
+  return out
+}
+
+/** 由查表构造 deck accessor。 */
+function lutAccessor(lut: Uint8Array): (o: unknown, info: { index: number }) => [number, number, number, number] {
+  return (_o, info) => {
+    const i = info.index * 4
+    return [lut[i]!, lut[i + 1]!, lut[i + 2]!, lut[i + 3]!]
+  }
+}
+
+/** 面图层填充色 accessor：180 透明度的专题查表（无该字段则退回单色）。 */
+function polygonFillAccessor(table: Table, spec: ThematicSpec): unknown {
+  const lut = thematicLut(table, spec, 180)
+  return lut ? lutAccessor(lut) : null
 }
 
 /** 按几何类型构造 GeoArrow 图层：点 → Scatterplot；线 → Path；面 → Polygon。 */
 export function makeGeoArrowLayers(spec: GeoArrowSpec, table: Table): Layer[] {
   const [r, g, b] = hexToRgb(spec.color)
+  // 专题配色：预算逐行 RGBA 查表（见 thematicLut）。字段不在 Arrow schema 里 → 退回单色。
+  const lut = spec.thematic ? thematicLut(table, spec.thematic, 255) : null
+  const fillAccessor = lut ? lutAccessor(lut) : [r, g, b, 255]
   const kind = geometryKindOf(table)
   const common = {
     id: `deck-${spec.id}-raw`,
@@ -45,18 +112,19 @@ export function makeGeoArrowLayers(spec: GeoArrowSpec, table: Table): Layer[] {
     pickable: true,
   }
   if (kind === 'point') {
-    return [new GeoArrowScatterplotLayer({ ...common, getFillColor: [r, g, b, 255], getRadius: spec.radius ?? 4, radiusUnits: 'pixels' })]
+    return [new GeoArrowScatterplotLayer({ ...common, getFillColor: fillAccessor as never, getRadius: spec.radius ?? 4, radiusUnits: 'pixels' })]
   }
   if (kind === 'line') {
-    return [new GeoArrowPathLayer({ ...common, getColor: [r, g, b, 255], getWidth: 2, widthUnits: 'pixels' })]
+    return [new GeoArrowPathLayer({ ...common, getColor: fillAccessor as never, getWidth: 2, widthUnits: 'pixels' })]
   }
   if (kind === 'polygon') {
     return [new GeoArrowPolygonLayer({
       ...common,
       filled: true,
       stroked: true,
-      getFillColor: [r, g, b, 180],
-      getLineColor: [r, g, b, 255],
+      // 填充单独算一张 180 透明度的查表（面不透明会盖住底图）；只算这一次，不重复。
+      getFillColor: (spec.thematic ? polygonFillAccessor(table, spec.thematic) : [r, g, b, 180]) as never,
+      getLineColor: fillAccessor as never,
       getLineWidth: 1,
       lineWidthUnits: 'pixels',
       // 自托管 earcut worker（worker 线程池并行剖分，百万面可用）；拿不到则主线程 earcut 兜底。
@@ -70,6 +138,12 @@ export function makeGeoArrowLayers(spec: GeoArrowSpec, table: Table): Layer[] {
  *  混合数据不再只画第一种几何；子层 id 带 `-raw-<kind>` 后缀供点击按族定位过滤数组。 */
 export function makeRawGeojsonLayers(spec: GeoArrowSpec, geojson: FeatureCollection): Layer[] {
   const [r, g, b] = hexToRgb(spec.color)
+  // 专题配色：逐要素按属性取值（这条路径的数据量在阈值以内，直接逐帧查表可接受）。
+  const pick = spec.thematic ? compileThematic(spec.thematic) : null
+  const field = spec.thematic?.field
+  const colorOf = (f: { properties?: Record<string, unknown> | null }): [number, number, number] =>
+    (pick && field ? pick(f.properties?.[field]) : [r, g, b])
+  const alphaOf = (base: [number, number, number], a: number): [number, number, number, number] => [base[0], base[1], base[2], a]
   const out: Layer[] = []
   for (const kind of geojsonFamilies(geojson)) {
     const id = `deck-${spec.id}-raw-${kind}`
@@ -78,7 +152,7 @@ export function makeRawGeojsonLayers(spec: GeoArrowSpec, geojson: FeatureCollect
         id,
         data: rawLineData(geojson),
         getPath: (f) => f.geometry.coordinates,
-        getColor: [r, g, b, 255],
+        getColor: (f) => alphaOf(colorOf(f), 255) as never,
         getWidth: 2,
         widthUnits: 'pixels',
         visible: spec.visible,
@@ -89,8 +163,8 @@ export function makeRawGeojsonLayers(spec: GeoArrowSpec, geojson: FeatureCollect
         id,
         data: rawPolygonData(geojson),
         getPolygon: (f) => f.geometry.coordinates,
-        getFillColor: [r, g, b, 180],
-        getLineColor: [r, g, b, 255],
+        getFillColor: (f) => alphaOf(colorOf(f), 180) as never,
+        getLineColor: (f) => alphaOf(colorOf(f), 255) as never,
         getLineWidth: 1,
         lineWidthUnits: 'pixels',
         visible: spec.visible,
@@ -101,7 +175,7 @@ export function makeRawGeojsonLayers(spec: GeoArrowSpec, geojson: FeatureCollect
         id,
         data: rawPointData(geojson),
         getPosition: (f) => f.geometry.coordinates as [number, number],
-        getFillColor: [r, g, b, 255],
+        getFillColor: (f) => alphaOf(colorOf(f), 255) as never,
         getRadius: spec.radius ?? 4,
         radiusUnits: 'pixels',
         visible: spec.visible,

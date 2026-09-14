@@ -158,24 +158,22 @@ test('DuckDbEngine：建表/信息/抽样/查询/删除', async () => {
   assert.equal(q.length, 5)
   assert.ok(q.every((r) => r.city === '天河'))
 
+  const positions = await engine.readPointCoordinates(`SELECT "lon_wgs84", "lat_wgs84" FROM ${t}`)
+  assert.equal(positions.length, 400, '200 行坐标应写为 400 个 Float64 值')
+  assert.deepEqual(Array.from(positions.slice(0, 2)), [113.01, 23.01])
+
   await engine.dropTable(t)
   assert.deepEqual(engine.tableNames(), [])
   await engine.close()
 })
 
-test('DuckDbEngine.arrowIpc：arrow(community) 可用时返回原生 IPC 字节；缺失则回退 null（跳过）', async () => {
+test('DuckDbEngine.arrowIpc：Node Neo 未提供 IPC 导出时稳定回退 null', async () => {
   const engine = new DuckDbEngine()
   try {
     const t = engine.nextTableName()
     await engine.createTableFromCsv(t, join(dir, 'poi.csv'))
     const buf = await engine.arrowIpc(`SELECT "lon_wgs84", "lat_wgs84" FROM ${t} LIMIT 100`)
-    if (!buf) {
-      // arrow 扩展不可用（离线/未缓存 community 扩展）：能力缺失属环境，不判失败。
-      console.warn('[test] skip: duckdb arrow 扩展不可用，arrowIpc 回退 null')
-      await engine.dropTable(t).catch(() => {})
-      return
-    }
-    assert.ok(buf.byteLength > 0, 'arrowIpc 应返回非空 IPC 字节')
+    assert.equal(buf, null)
     await engine.dropTable(t)
     assert.deepEqual(engine.tableNames(), [])
   } finally {

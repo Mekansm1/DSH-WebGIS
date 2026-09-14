@@ -25,19 +25,15 @@ export function registerBasemapTools(ctx: Context, rt: GeoToolRuntime): void {
   ctx.tools.register(defineTool({
     name: 'webgis_export_basemap',
     description: COMMON
-      + '【导出当前视野的底图数据】把当前地图视野内的**底图矢量要素**取出为新图层，可继续做分析（算长度/面积、做缓冲、空间叠加等）。'
+      + '【导出当前视野的底图数据 → 新图层】把当前地图视野内的**底图矢量要素**取出为新图层，可继续做分析（算长度/面积、做缓冲、空间叠加等）。'
+      + '⚠ 三个「导出」别混：本工具**不产出文件**，是把底图要素变成图层；用户要**数据文件**（CSV/GeoJSON）用 webgis_export_layer；要**图片**用 webgis_export_map。'
       + `内置图层：${basemapLayerCatalog()}。`
       + '**用户没指定具体图层时（如"导出当前范围的地图数据"）不要传 layer** —— 会导出全部内容图层并**按几何分成点/线/面三个结果图层**，这才是该需求的默认语义。'
       + '用户指定了某一类时才传 layer（如"河流""道路""建筑"），会映射到对应的底图图层，只出一个图层。'
-      + '可选：name 按名字筛选（如只要"白浪河"，河流/公园/POI 带名字）；classes 按类目筛选（如只要 primary 道路）。'
-      + '默认把同名要素归并成一个要素（同一条河在瓦片里是分段存储的，归并后"白浪河"=1 个要素）。'
-      + '⚠️ 前提：当前底图必须是**矢量底图**（OpenFreeMap Liberty / Carto Positron / Carto Voyager / Carto Dark）；'
-      + '光栅底图（默认的 Carto 浅色、Esri 影像）没有矢量数据可提取。'
-      + '⚠️ 范围仅限**当前视野**（所见即所得），不用于批量导出大范围数据 —— 那请让用户用 Geofabrik/Overpass 取数据后走 webgis_load_dataset 导入。'
-      + '⚠️ 道路图层（transportation）**不带路名**，按名字筛路无效；想要带路名的路请点名 transportation_name，或按 classes 筛等级。'
-      + '⚠️ **底图瓦片按缩放级别裁剪**：级别越低图层越少（省级只有水系/主要道路/保护区/地名；'
-      + 'POI、建筑、门牌号要放大到城市/街区级才有）。所以视野很广时点要素会很少，'
-      + '这不是漏导 —— 结果里会提示哪些图层在该级别不存在，请把这点转告用户并建议放大后再导出。',
+      + '可选：name 按名字筛选（如只要"白浪河"，河流/公园/POI 带名字）；classes 按类目筛选（如只要 primary 道路）。默认把同名要素归并成一个要素（同一条河在瓦片里分段存储）。'
+      + '⚠️ 前提：当前底图必须是**矢量底图**（OpenFreeMap Liberty / Carto 三种）；光栅底图（Carto 浅色、Esri 影像）没有矢量数据可提取。'
+      + '⚠️ 范围仅限**当前视野**，不是批量导出。⚠️ 道路图层（transportation）**不带路名**，按名字筛路无效（要路名请点名 transportation_name）。'
+      + '⚠️ 底图瓦片按缩放级别裁剪，级别越低图层越少（POI/建筑要到城市级才有）——视野很广时点要素少不是漏导，结果里会列出该级别不存在的图层，请转告用户并建议放大后再导。',
     parameters: {
       layer: { type: 'string', description: '要导出的底图图层（用户说法或图层名，如 河流 / waterway / 道路）。**用户没指定具体类别时省略** → 导出全部并分成点/线/面三个图层' },
       name: { type: 'string', description: '只导出名字包含该串的要素（如 白浪河）。河流/公园/POI 支持；道路不支持' },

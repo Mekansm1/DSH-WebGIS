@@ -18,6 +18,7 @@ import {
   requirePointsOnly,
   summarize,
 } from './geo-processing.js'
+import { RAMPS, buildThematic, formatLegend } from './thematic.js'
 import type { GeoToolRuntime } from './geo-tools-runtime.js'
 
 export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
@@ -119,7 +120,7 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_set_layer_visibility',
-    description: '显示或隐藏一个图层。',
+    description: '显示或隐藏一个图层（只切可见性，不删数据 —— 要移除请用 webgis_remove_layer）。图层 id 见 webgis_list_layers。',
     parameters: {
       layer: LAYER_PARAM,
       visible: { type: 'boolean', required: true, description: 'true=显示，false=隐藏' },
@@ -153,8 +154,74 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'webgis_set_layer_thematic',
+    description: COMMON + '【专题配色·按字段上色】按某个属性字段给图层分箱上色（choropleth），让同一图层不同要素显示不同颜色。'
+      + '数值字段用 method=jenks（自然断点，默认，断点落在属性突变处）/ quantile（分位数，每类要素数相等）/ equal（等间距）；'
+      + '文字或离散字段用 method=category（每个取值一个颜色）。'
+      + 'ramp 选色带：数值常用 blues/greens/oranges/reds/purples/viridis（顺序型）、spectral（分歧型，有中心意义时用）；'
+      + '分类用 set2（定性型）。classes 默认 5 级（2~12）。'
+      + '⚠ 缺值**不会**被当成 0 混进某一级 —— 它们单独用中性灰显示，并在结果里报出个数。'
+      + '⚠ 这是纯展示变更：不改数据、不影响统计结果。想改回单色用 webgis_set_layer_color。',
+    parameters: {
+      layer: LAYER_PARAM,
+      field: { type: 'string', required: true, description: '用于上色的属性字段（数值列做分箱，文字列按类别）' },
+      method: {
+        type: 'string',
+        enum: ['jenks', 'quantile', 'equal', 'category'],
+        description: '分箱方法：jenks=自然断点（默认，数值）/ quantile=分位数（数值）/ equal=等间距（数值）/ category=按类别取值（文字列）',
+      },
+      classes: { type: 'integer', description: '分几级，默认 5（2~12）。仅数值型方法有效' },
+      ramp: { type: 'string', description: `色带名（默认数值用 blues、分类用 set2）：${Object.keys(RAMPS).join(' / ')}` },
+      colors: { type: 'json', description: '直接指定颜色数组（覆盖 ramp），长度需 ≥ 级数' },
+    },
+    output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => false,
+    execute(args, exec) {
+      const { resolve } = sess(exec)
+      const layer = resolve(args.layer)
+      if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
+      const method = args.method === 'jenks' || args.method === 'quantile' || args.method === 'equal' || args.method === 'category'
+        ? args.method
+        : 'jenks'
+      const colors = Array.isArray(args.colors)
+        ? args.colors.filter((c): c is string => typeof c === 'string' && /^#[0-9a-f]{3,8}$/i.test(c))
+        : undefined
+      const res = buildThematic(layer.geojson, {
+        field: args.field,
+        method,
+        ...(typeof args.classes === 'number' ? { classes: args.classes } : {}),
+        ...(typeof args.ramp === 'string' && args.ramp ? { ramp: args.ramp } : {}),
+        ...(colors && colors.length ? { colors } : {}),
+      })
+      if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
+      // 纯展示变更：原地写、不 bump rev（客户端按 thematic 字段重渲染，不重拉数据）。
+      const err = applyStyle(layer, { thematic: res.spec })
+      if (err) return Promise.resolve({ ok: false, message: err })
+      // 大图层（materialized=false）的 layer.geojson 只是上图抽样：分箱断点与级内计数都基于抽样，
+      // 不能沿用「级内计数仍按全量」那句话——那是物化图层才成立的（Jenks 2000 封顶抽样但 fc 是全量）。
+      const sampled = layer.materialized === false
+        ? `（⚠ 本层共 ${layer.totalCount ?? '?'} 行，地图上只显示 ${layer.featureCount} 行；分箱断点与级内计数都基于这 ${layer.featureCount} 行抽样，不是全量）`
+        : res.spec.sampledFrom
+          ? `（⚠ 断点基于 ${res.spec.sampledFrom} 个有效值的抽样计算，级内计数仍按全量）`
+          : ''
+      const noData = res.spec.missing > 0
+        ? `\n⚠ 有 ${res.spec.missing} 个要素在该字段上没有值，已单独用中性灰显示（没有混进任何一级）。`
+        : ''
+      return Promise.resolve({
+        ok: true,
+        layerId: layer.id,
+        thematic: res.spec as unknown as JsonValue,
+        legend: res.labels,
+        message: `${formatLegend(res.spec, res.labels)}${sampled}${noData}`
+          + `\n请把这份图例转述给用户（颜色与区间要对应上）。改回单色用 webgis_set_layer_color。`,
+      })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'webgis_set_layer_color',
-    description: COMMON + '修改指定图层的显示颜色（仅改变显示、不改动图层数据，也不重新计算）。接受十六进制（#f73 / f97316）或颜色名（red / orange / 橙红 / 蓝 / 绿…）。适用于任何图层（含基础数据集 dataset 与结果图层）。更完整的样式（点位大小/外轮廓/填充色）请用 webgis_set_layer_style。',
+    description: COMMON + '修改指定图层的显示颜色（仅改变显示、不改动图层数据，也不重新计算）。接受十六进制（#f73 / f97316）或颜色名（red / orange / 橙红 / 蓝 / 绿…）。适用于任何图层。更完整的样式（点位大小/外轮廓/填充色）请用 webgis_set_layer_style。',
     parameters: {
       layer: LAYER_PARAM,
       color: { type: 'string', required: true, description: '目标颜色：十六进制 #rrggbb / #rgb（可省略 #）或颜色名（red/orange/blue/绿/蓝…）' },
@@ -191,7 +258,7 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_set_layer_style',
-    description: COMMON + '修改图层渲染样式（仅改变显示、不改动图层数据，也不重新计算）：color=整体颜色（填充+描边默认值）、radius=点位大小（像素，点图层 circle-radius）、strokeWidth=外轮廓粗细（像素，点描边与面边界线宽）、fillColor=内填充颜色（覆盖 color 用于填充：点=圆点填充、面=多边形填充）。字段缺省保持原值。适用于任何图层（含基础数据集 dataset 与结果图层）。',
+    description: COMMON + '修改图层渲染样式（仅改变显示、不改动图层数据，也不重新计算）：color=整体颜色（填充+描边默认值）、radius=点位大小（像素，点图层 circle-radius）、strokeWidth=外轮廓粗细（像素，点描边与面边界线宽）、fillColor=内填充颜色（覆盖 color 用于填充：点=圆点填充、面=多边形填充）。字段缺省保持原值。适用于任何图层。',
     parameters: {
       layer: LAYER_PARAM,
       color: { type: 'string', description: '整体颜色（十六进制 #rrggbb/#rgb 或颜色名），缺省保持原值' },
@@ -262,6 +329,9 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const field = typeof args.field === 'string' && args.field ? args.field : ''
       if (!field) return Promise.resolve({ ok: false, message: 'field 不能为空' })
+      // 大图层的 geojson 只是上图抽样：只写进抽样那几行，Arrow 渲染读的却是原表 → 新值根本看不见。
+      const merr = requireMaterialized(layer, '写属性')
+      if (merr) return Promise.resolve({ ok: false, message: merr })
       const value = args.value
       if (typeof value !== 'number' && typeof value !== 'string' && typeof value !== 'boolean') {
         return Promise.resolve({ ok: false, message: 'value 必须是数字/字符串/布尔' })
@@ -310,6 +380,9 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const field = typeof args.field === 'string' && args.field ? args.field : 'seq'
+      // 大图层的 geojson 只是上图抽样：编号只写进抽样行，且抽样行序 ≠ 源表行序，序号本身也是错的。
+      const merr = requireMaterialized(layer, '写序号')
+      if (merr) return Promise.resolve({ ok: false, message: merr })
       const start = Number.isFinite(Number(args.start)) ? Math.floor(Number(args.start)) : 0
       const count = opAddSequence(layer, field, start)
       layer.rev += 1
@@ -340,6 +413,9 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const field = typeof args.field === 'string' && args.field ? args.field : ''
       if (!field) return Promise.resolve({ ok: false, message: 'field 不能为空' })
+      // 大图层的 geojson 只是上图抽样：列只加到抽样行上，Arrow 渲染读原表 → 新列不可见。
+      const merr = requireMaterialized(layer, '新增字段')
+      if (merr) return Promise.resolve({ ok: false, message: merr })
       const count = opAddColumn(layer, field)
       if (count === 0) return Promise.resolve({ ok: false, message: `字段 ${field} 在图层 ${layer.id} 已存在，无需新增` })
       layer.rev += 1
@@ -405,7 +481,7 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_set_render_mode',
-    description: COMMON + '切换指定图层的展示方式/出图效果（仅改变显示、不改动图层数据，也不重新计算）：points=原始点；plane=平面热力图（maplibre 原生 heatmap 平滑热色）；hex=蜂窝热力图（六边形柱，柱高=密度，地图自动俯仰到 60°）；arc=弧线图（deck.gl，线图层每段首尾点连弧，OD 流向图）；trips=轨迹图（deck.gl，整条路径静态显示 + 白色高亮头点从起点缓缓走到终点）；wall=围墙图（deck.gl，面图层拉伸成 3D 半透明围栏/行政区划/AOI 块，突出区域）；radial=辐射图（deck.gl，点图层绕点画米制半径圆，表示影响范围/突出目标点）。几何要求：plane/hex/radial 需点要素、arc/trips 需线要素、wall 需面要素。可选 params：radius=辐射半径（米，radial 生效）、height=围墙高度（米，wall 生效）、width=线宽（像素，arc/trips 线宽、wall 描边宽）、speed=轨迹速度（trips 生效）、greatCircle=弧线沿地球表面最短路径大圆 0/1（arc 生效）、flow=弧线按流量字段（flow/value/volume/count）映射粗细深浅 0/1（arc 生效）。适用于任何图层（含基础数据集 dataset 与原始点图层）。',
+    description: COMMON + '切换指定图层的展示方式/出图效果（仅改变显示、不改动图层数据，也不重新计算）：points=原始点；plane=平面热力图（maplibre 原生 heatmap 平滑热色）；hex=蜂窝热力图（六边形柱，柱高=密度，地图自动俯仰到 60°）；arc=弧线图（deck.gl，线图层每段首尾点连弧，OD 流向图）；trips=轨迹图（deck.gl，整条路径静态显示 + 白色高亮头点从起点缓缓走到终点）；wall=围墙图（deck.gl，面图层拉伸成 3D 半透明围栏/行政区划/AOI 块，突出区域）；radial=辐射图（deck.gl，点图层绕点画米制半径圆，表示影响范围/突出目标点）。几何要求：plane/hex/radial 需点要素、arc/trips 需线要素、wall 需面要素。可选 params：radius=辐射半径（米，radial 生效）、height=围墙高度（米，wall 生效）、width=线宽（像素，arc/trips 线宽、wall 描边宽）、speed=轨迹速度（trips 生效）、greatCircle=弧线沿地球表面最短路径大圆 0/1（arc 生效）、flow=弧线按流量字段（flow/value/volume/count）映射粗细深浅 0/1（arc 生效）。适用于任何图层。',
     parameters: {
       layer: LAYER_PARAM,
       mode: {
@@ -462,7 +538,7 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
   // 兼容旧名：仅热力三种展示方式，走同一 applyMode。
   ctx.tools.register(defineTool({
     name: 'webgis_set_heatmap_mode',
-    description: COMMON + '切换指定图层的展示方式（等价 webgis_set_render_mode 的 points/plane/hex 子集）。points=原始点；plane=平面热力图（maplibre 原生 heatmap 平滑热色）；hex=蜂窝热力图（六边形柱，柱高=密度，地图自动俯仰到 60°）。适用于任何点图层（含基础数据集 dataset 与原始点图层）。',
+    description: COMMON + '【旧接口·建议优先用 webgis_set_render_mode】切换点图层的展示方式（等价 webgis_set_render_mode 的 points/plane/hex 子集；后者还支持 arc/trips/wall/radial）。points=原始点；plane=平面热力图（maplibre 原生 heatmap 平滑热色）；hex=蜂窝热力图（六边形柱，柱高=密度，地图自动俯仰到 60°）。适用于任何点图层。',
     parameters: {
       layer: LAYER_PARAM,
       mode: {

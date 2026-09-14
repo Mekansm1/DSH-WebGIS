@@ -13,7 +13,7 @@
  * 点+研究区），指数可以无限往里挂。新增一个指数 = 一个字段级 `fieldFilter` + 一个 compute + 一条注册项。
  */
 import type { Feature, FeatureCollection } from 'geojson'
-import { MAX_GRID_CELLS, defaultWeightFor, makeWeightMatrix, type WeightOptions } from './geo-stats.js'
+import { MAX_GRID_CELLS, defaultWeightFor, makeWeightMatrix, minMax, type WeightOptions } from './geo-stats.js'
 
 // ---------------------------------------------------------------- 类型
 
@@ -27,6 +27,8 @@ export type IndexId = 'gini' | 'shannon' | 'getis_ord' | 'kernel_density' | 'mor
 export interface FieldStat {
   field: string
   valid: number
+  /** 空值 + 非数值的绝对个数（与 geo-stats-tools.FieldReport 同构）。 */
+  missing: number
   nullRate: number
   min: number
   max: number
@@ -109,11 +111,81 @@ export interface IndexVerdict {
   suggestNote?: string
 }
 
+// ---------------------------------------------------------------- 缺失值：不替用户决定
+
+/**
+ * 缺失值处理策略。**不传 = 不替用户决定**：有缺失就返回 {@link MissingDecision}，
+ * 把「丢弃 / 当 0 / 当成一个类别」的选择交回对话，由模型问用户。
+ *
+ * 这与莫兰指数已经确立的「勘察 → 告知 → 确认 → 计算」是同一个范式，
+ * 只是对象从「用哪个字段」换成了「缺失值怎么办」。
+ */
+export type MissingPolicy = 'drop' | 'zero' | 'asCategory'
+
+/**
+ * 「缺失值需要先确认」的结果 —— **不是错误**，是待用户拍板。
+ * 调用方（工具层）应把 message 原样交给模型去问用户，而不是当成失败重试。
+ */
+export interface MissingDecision {
+  ok: false
+  /** 判定标记：区分「需要用户选择」与「真的算不了」。 */
+  missingDecision: true
+  field: string
+  missing: number
+  total: number
+  /** 该指数支持的选择（原样作为 missing 参数回传）。 */
+  options: MissingPolicy[]
+  message: string
+}
+
+/**
+ * 组装「缺失值请先确认」的结果。
+ * @param why - 为什么这个指数的缺失不能随便处理；各指数影响不同，必须说清而不是套话。
+ */
+function missingDecision(
+  field: string,
+  missing: number,
+  total: number,
+  options: Array<{ id: MissingPolicy; label: string }>,
+  why: string,
+): MissingDecision {
+  return {
+    ok: false,
+    missingDecision: true,
+    field,
+    missing,
+    total,
+    options: options.map((o) => o.id),
+    message: `字段 ${field} 有 ${missing} 个空值或非数值（有效 ${total - missing}/${total}）。${why}`
+      + '**请先与用户确认怎么处理，不要替用户决定** —— '
+      + options.map((o) => `${o.label} → 传 missing="${o.id}"`).join('；')
+      + '；或者先让用户把这些要素过滤掉再算。',
+  }
+}
+
+/** 判定一个结果是不是「等用户选缺失值策略」。 */
+export function isMissingDecision(r: unknown): r is MissingDecision {
+  return !!r && typeof r === 'object' && (r as { missingDecision?: unknown }).missingDecision === true
+}
+
 // ---------------------------------------------------------------- 计算：基尼系数
 
 export type GiniResult =
+  | MissingDecision
   | { ok: false; message: string }
-  | { ok: true; gini: number; n: number; skipped: number; sum: number; mean: number; min: number; max: number }
+  | {
+      ok: true
+      gini: number
+      n: number
+      /** 缺失值个数（未缺失时为 0）。 */
+      missing: number
+      /** 实际采用的处理策略；'none' = 本来就没缺失。 */
+      missingPolicy: 'none' | 'drop' | 'zero'
+      sum: number
+      mean: number
+      min: number
+      max: number
+    }
 
 /**
  * 属性值 → 数值。**不能用 Number(v) 直接转**：`Number(null)` / `Number('')` / `Number(false)` 都是 0，
@@ -143,13 +215,34 @@ function collectNumbers(feats: Feature[], field: string): { xs: number[]; skippe
  *   G = 2·Σ(i·x_(i)) / (n·Σx) − (n+1)/n   （x 升序，i 从 1 开始）
  * 0 = 完全平均，→1 = 完全不平均。负值无意义（比率型指标），直接报错。
  */
-export function opGini(input: FeatureCollection, field: string): GiniResult {
+export function opGini(
+  input: FeatureCollection,
+  field: string,
+  opts: { missing?: MissingPolicy } = {},
+): GiniResult {
   const feats = input.features.filter((f) => f?.properties)
   if (feats.length < 3) return { ok: false, message: `至少需要 3 个要素（当前 ${feats.length} 个）` }
-  const { xs, skipped } = collectNumbers(feats, field)
+  const { xs: present, skipped } = collectNumbers(feats, field)
+  let xs = present
+  let missingPolicy: 'none' | 'drop' | 'zero' = 'none'
+  if (skipped > 0) {
+    if (opts.missing === 'drop') missingPolicy = 'drop'
+    else if (opts.missing === 'zero') {
+      missingPolicy = 'zero'
+      // 基尼只看数值多重集，补 skipped 个 0 与「逐行填 0」等价。
+      xs = [...present, ...new Array<number>(skipped).fill(0)]
+    } else if (opts.missing === 'asCategory') {
+      return { ok: false, message: '基尼系数按数值列计算，「把缺失当成一个类别」（missing="asCategory"）不适用；请改用 missing="drop" 或 missing="zero"。' }
+    } else {
+      return missingDecision(field, skipped, feats.length, [
+        { id: 'drop', label: '丢弃这些要素后计算（= 认定它们不属于总体）' },
+        { id: 'zero', label: '把它们当 0 参与计算（= 认定它们份额为零）' },
+      ], '基尼系数对这两种处理的答案差别很大，而且含义不同 —— 不是可随便取的默认值。')
+    }
+  }
   if (xs.length < 3) return { ok: false, message: `字段 ${field} 的有效数值不足（${xs.length} 个）` }
   const sum = xs.reduce((a, b) => a + b, 0)
-  const min = Math.min(...xs)
+  const { min } = minMax(xs)
   if (min < 0) return { ok: false, message: `字段 ${field} 含负值（${min}）：基尼系数要求非负` }
   if (!(sum > 0)) return { ok: false, message: `字段 ${field} 合计为 0，无法计算基尼系数` }
   const sorted = [...xs].sort((a, b) => a - b)
@@ -161,11 +254,12 @@ export function opGini(input: FeatureCollection, field: string): GiniResult {
     ok: true,
     gini: Number(gini.toFixed(4)),
     n,
-    skipped,
+    missing: skipped,
+    missingPolicy,
     sum: Number(sum.toFixed(4)),
     mean: Number((sum / n).toFixed(4)),
     min,
-    max: Math.max(...xs),
+    max: minMax(xs).max,
   }
 }
 
@@ -173,7 +267,11 @@ export function opGini(input: FeatureCollection, field: string): GiniResult {
 
 export type ShannonMode = 'category' | 'value'
 
+/** category 模式下把缺失当成独立类别时使用的键名。 */
+export const SHANNON_MISSING_KEY = '(空值/缺失)'
+
 export type ShannonResult =
+  | MissingDecision
   | { ok: false; message: string }
   | {
       ok: true
@@ -183,7 +281,8 @@ export type ShannonResult =
       categories: number
       mode: ShannonMode
       n: number
-      skipped: number
+      missing: number
+      missingPolicy: 'none' | 'drop' | 'asCategory'
       top: Array<{ key: string; share: number }>
     }
 
@@ -199,6 +298,7 @@ export function opShannon(
   input: FeatureCollection,
   field: string,
   mode: ShannonMode | 'auto' = 'auto',
+  opts: { missing?: MissingPolicy } = {},
 ): ShannonResult {
   const feats = input.features.filter((f) => f?.properties)
   if (feats.length < 3) return { ok: false, message: `至少需要 3 个要素（当前 ${feats.length} 个）` }
@@ -219,11 +319,19 @@ export function opShannon(
 
   const shares: Array<{ key: string; share: number }> = []
   let skipped = 0
+  let missingPolicy: 'none' | 'drop' | 'asCategory' = 'none'
   if (picked === 'value') {
+    // 丰度解读下缺失值「丢弃」与「当 0」在数学上等价：0 份额对 H 没有贡献。
+    // （真去补 0 反而有害 —— 会多出一个 p=0 的类别抬高 S，进而把均匀度 H/lnS 算小，
+    //   并且 0·ln0 在 JS 里是 NaN。）所以这里不给「选」，只如实报告。
+    if (opts.missing === 'asCategory') {
+      return { ok: false, message: `字段 ${field} 按数值（丰度）解读，缺失值不是一个类别（missing="asCategory" 不适用）；用 missing="drop" 即可（与当 0 等价）。` }
+    }
     const { xs, skipped: sk } = collectNumbers(feats, field)
     skipped = sk
+    missingPolicy = skipped > 0 ? 'drop' : 'none'
     if (xs.length < 3) return { ok: false, message: `字段 ${field} 的有效数值不足（${xs.length} 个）` }
-    const min = Math.min(...xs)
+    const { min } = minMax(xs)
     if (min < 0) return { ok: false, message: `字段 ${field} 含负值（${min}）：按数值（丰度）解读时要求非负，或改用 mode=category` }
     const total = xs.reduce((a, b) => a + b, 0)
     if (!(total > 0)) return { ok: false, message: `字段 ${field} 合计为 0，无法计算香农熵` }
@@ -238,14 +346,34 @@ export function opShannon(
     }
     for (const [key, s] of byVal) shares.push({ key, share: s / total })
   } else {
+    // 类别解读下缺失值「丢弃」与「当成一个独立类别」是不同的指标：
+    // 后者会把 H 和类别数 S 一起抬高（均匀度 H/lnS 也变），这是用户该自己决定的事。
+    const blanks = feats.reduce((a, f) => {
+      const v = f.properties?.[field]
+      return a + (v == null || v === '' ? 1 : 0)
+    }, 0)
+    if (blanks > 0 && opts.missing !== 'drop' && opts.missing !== 'asCategory') {
+      return missingDecision(field, blanks, feats.length, [
+        { id: 'drop', label: '丢弃这些要素（不把它们算作一个类别）' },
+        { id: 'asCategory', label: `把它们当成一个独立类别「${SHANNON_MISSING_KEY}」` },
+      ], '按类别解读时这两种处理会得到不同的熵值 —— 当成一类会同时抬高 H 和类别数，丢弃则不会。')
+    }
+    const asCategory = blanks > 0 && opts.missing === 'asCategory'
+    missingPolicy = blanks > 0 ? (asCategory ? 'asCategory' : 'drop') : 'none'
     const byVal = new Map<string, number>()
     for (const f of feats) {
       const v = f.properties?.[field]
-      if (v == null || v === '') { skipped++; continue }
+      if (v == null || v === '') {
+        if (!asCategory) { skipped++; continue }
+        byVal.set(SHANNON_MISSING_KEY, (byVal.get(SHANNON_MISSING_KEY) ?? 0) + 1)
+        continue
+      }
       const key = String(v)
       byVal.set(key, (byVal.get(key) ?? 0) + 1)
     }
-    const total = feats.length - skipped
+    // missing 要如实报缺失个数，与采用哪种策略无关。
+    if (asCategory) skipped = blanks
+    const total = asCategory ? feats.length : feats.length - skipped
     if (total < 3 || byVal.size < 2) {
       return { ok: false, message: `字段 ${field} 的类别不足（${byVal.size} 类）：香农熵至少需要 2 个类别、3 个有效值` }
     }
@@ -265,7 +393,8 @@ export function opShannon(
     categories: s,
     mode: picked,
     n: feats.length,
-    skipped,
+    missing: skipped,
+    missingPolicy,
     top: shares.slice(0, 5).map((t) => ({ key: t.key, share: Number(t.share.toFixed(4)) })),
   }
 }
@@ -655,6 +784,16 @@ export function judgeIndex(spec: IndexSpec, shape: LayerShape): IndexVerdict {
       : `现有数值字段都不满足本指数的要求（${fieldIssues.map((i) => `${i.field}：${i.reason}`).join('；')}）`)
   }
 
+  // 空间类指数对缺失是硬拦（见 missingTolerance）：候选字段全都有缺失 = 当前这个图层做不了，
+  // 必须在勘察阶段就判成不可行 —— 否则卡片会一边说"可以计算"一边说"不能用这个字段"，自相矛盾。
+  if (missingTolerance(spec) === 'forbidden' && candidates.length > 0) {
+    const dirty = candidates.filter((f) => f.missing > 0)
+    if (dirty.length === candidates.length) {
+      reasons.push(`候选数值字段都有缺失（${dirty.map((f) => `${f.field} 缺 ${f.missing}`).join('、')}）：`
+        + '本指数的权重矩阵建立在整个要素集上，缺失不是可以「选」的处理方式')
+    }
+  }
+
   const suggestedParams: Record<string, string | number> = {}
   let suggestNote: string | undefined
   if (spec.suggest) {
@@ -681,23 +820,54 @@ export function judgeIndex(spec: IndexSpec, shape: LayerShape): IndexVerdict {
   }
 }
 
-/** 一行字段摘要（确认卡片用）。 */
+/** 一行字段摘要（确认卡片用）。**缺值必须显性写出来** —— 用户不该拿总数去减。 */
 export function fieldStatLine(f: FieldStat): string {
-  return `${f.field}（有效 ${f.valid}，均值 ${f.mean}，标准差 ${f.std}，唯一值 ${f.unique}）`
+  return `${f.field}（有效 ${f.valid}${f.missing > 0 ? `，**缺 ${f.missing}**` : ''}，均值 ${f.mean}，标准差 ${f.std}，唯一值 ${f.unique}）`
+}
+
+/** 该指数能不能容忍缺失值；用于在勘察阶段就把「这个字段算不了」说在前面。 */
+export function missingTolerance(spec: IndexSpec): 'forbidden' | 'choose' | 'equivalent' | 'none' {
+  if (spec.family === 'spatial') return 'forbidden'
+  if (spec.id === 'shannon') return 'choose'
+  if (spec.id === 'gini') return 'choose'
+  return 'none'
 }
 
 /** 判定结果 → 给用户看的可读卡片（纯字符串组装，便于单测）。 */
 export function formatVerdict(spec: IndexSpec, v: IndexVerdict): string {
   const head = `【${spec.name}】图层「${v.layerName}」(${v.layerId})`
   if (!v.feasible) {
-    const fix = spec.family === 'field'
-      ? '建议：换一个数值属性完整的图层，或用 webgis_sql_layer 从现有表派生数值列（如密度=数量/面积）。'
-      : '建议：换一个几何一致、有数值属性的图层；抽样图层先筛成全量再分析。'
+    // 候选字段全都有缺失（空间类硬拦）→ 给两条能真正走下去的路，而不是泛泛的"换个图层"。
+    const allDirty = missingTolerance(spec) === 'forbidden'
+      && v.candidates.length > 0 && v.candidates.every((f) => f.missing > 0)
+    const fix = allDirty
+      ? '建议二选一：①换一个数值完整的字段再做本指数；'
+        + '②先让用户决定怎么处置这些要素（webgis_filter_layer 按属性筛掉缺该字段的要素，'
+        + '或用 webgis_set_attribute 给它们补上确切的取值），把图层整理干净再做。'
+        + '⚠ 不要用 0 去补 —— 空间统计的邻域关系会被填补值污染。'
+      : spec.family === 'field'
+        ? '建议：换一个数值属性完整的图层，或用 webgis_sql_layer 从现有表派生数值列（如密度=数量/面积）。'
+        : '建议：换一个几何一致、有数值属性的图层；抽样图层先筛成全量再分析。'
     return [`${head}：当前无法计算 —— ${v.reasons.join('；')}。`, fix].join('')
   }
   const parts = [`${head}：可以计算。`]
   if (v.candidates.length) {
     parts.push(`候选字段：${v.candidates.slice(0, 5).map(fieldStatLine).join('；')}。`)
+  }
+  // 缺失值：在用户拍板「用这个指数」之前就把后果讲明白，而不是等他提了要求才吃一个错误。
+  const tol = missingTolerance(spec)
+  const withMissing = v.candidates.filter((f) => f.missing > 0)
+  if (withMissing.length && tol !== 'none') {
+    const list = withMissing.slice(0, 5).map((f) => `${f.field}（缺 ${f.missing}）`).join('、')
+    if (tol === 'forbidden') {
+      parts.push(`⛔ 下列候选字段有缺失，**不能**用于本指数：${list}。`
+        + '空间自相关/热点分析的权重矩阵建立在**整个要素集**上，删掉任何一个单元都会改变全部邻接关系，'
+        + '填 0 则直接污染邻域 —— 所以缺失在这里不是可以「选」的处理方式。'
+        + '请让用户二选一：换一个完整的字段，或先用 webgis_filter_layer / webgis_select_by_value 过滤掉这些要素。')
+    } else {
+      parts.push(`⚠ 下列候选字段有缺失：${list}。`
+        + '本指数对缺失的处理**会改变结果**，计算时你需要先问用户选哪种（丢弃 / 当 0 / 当成一类），工具会把选择交回给你，不会替用户决定。')
+    }
   }
   if (v.fieldIssues.length) {
     parts.push(`不满足要求：${v.fieldIssues.slice(0, 5).map((i) => `${i.field}（${i.reason}）`).join('、')}。`)

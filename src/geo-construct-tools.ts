@@ -25,7 +25,9 @@ export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_buffer',
-    description: COMMON + '对指定图层做缓冲区分析（buffer），结果生成新的面图层。distance 为缓冲区半径，unit 为半径单位。',
+    description: COMMON + '对指定图层做缓冲区分析（buffer），结果生成新的面图层。distance 为缓冲区半径，unit 为半径单位。'
+      + '⚠ **必须显式传 unit**：缺省是 kilometers，用户说「缓冲 500 米」而漏传 unit 会得到 500 公里（差 1000 倍）。'
+      + '用户用中文口语说「米/公里」时对应传 meters / kilometers，不要依赖默认值。',
     parameters: {
       layer: LAYER_PARAM,
       distance: { type: 'number', required: true, description: '缓冲区半径（大于 0）' },
