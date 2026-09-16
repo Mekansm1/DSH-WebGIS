@@ -19,6 +19,7 @@ import type { VisionConfig, VisionAnalysisResult } from './vision-chain.js'
 import { analyzeScreenshotChain } from './vision-chain.js'
 import { makeResultLayer, summarize } from './geo-processing.js'
 import { registerGeoTools } from './geo-tools.js'
+import { GeoJobRunner } from './geo-jobs.js'
 import { CARTO_LIGHT_TILES } from './basemaps.js'
 import type { PostgisConfig } from './postgis.js'
 import type { DbManager } from './db-manager.js'
@@ -146,6 +147,9 @@ const VisionSettingsSchema = z.object({
 const PIXEL_TOOLS_ENABLED = false
 
 export function apply(ctx: Context, config: Config): void {
+  // 重几何/统计任务运行在独立 worker；插件停用或宿主关闭时强制终止，避免遗留忙等 Node 线程。
+  const geoJobs = new GeoJobRunner()
+  ctx.effect(() => () => { void geoJobs.dispose() }, 'webgis: geo job cleanup')
   // ---- 会话状态存储：所有地图状态（dataset/navigate/pick/图层）按 session id 隔离 ----
   // 工具侧 exec.agent?.id 与客户端 ?session=<会话 id> 共用同一键，互不串扰、销毁即回收。
   let defaultDataset: DatasetInfo | null = null
@@ -966,6 +970,7 @@ export function apply(ctx: Context, config: Config): void {
     // 图层有内存表时，select_by_value 内部改道到这里跑**全表**（否则只在上图抽样 5 万行上筛，静默算错）。
     // 惰性取值：注册工具时引擎可能还没建，传值会在插件启动期就把 DuckDB 拉起来。
     attrFilterFullTable: createFullTableAttrFilter(getDuckDb),
+    runGeoJob: (job, timeoutMs, opts) => geoJobs.run(job, timeoutMs, opts),
   })
 
   // ---- PostgreSQL/PostGIS 工具：库结构读取 + 只读查询 → 图层（source: 'postgis'） ----

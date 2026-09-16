@@ -17,7 +17,8 @@ import {
   defaultWeightFor, minMax, opAverageNearestNeighbor, opKernelDensity, opLocalMoranI, opMoranI,
   PERMUTATIONS_DEFAULT, type WeightType,
 } from './geo-stats.js'
-import type { GeoToolRuntime } from './geo-tools-runtime.js'
+import { ISOLATED_NOTE, type GeoToolRuntime } from './geo-tools-runtime.js'
+import { GEO_TOOL_TIMEOUTS, layerScale, workerBudget } from './geo-job-policy.js'
 
 /** 权重方式参数的 schema 片段（三个工具共用文案）。 */
 const WEIGHT_PARAMS = {
@@ -113,11 +114,12 @@ export function fieldLine(r: FieldReport): string {
 }
 
 export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
-  const { sess, COMMON, MODE_LABEL, REMINDER, LAYER_RESULT_SCHEMA, LAYER_PARAM, STAT_RESULT_SCHEMA, text } = rt
+  const { sess, COMMON, MODE_LABEL, REMINDER, LAYER_RESULT_SCHEMA, LAYER_PARAM, STAT_RESULT_SCHEMA, text, runGeoOp } = rt
 
   ctx.tools.register(defineTool({
     name: 'webgis_kernel_density',
-    description: COMMON + '对点图层做 quartic 核密度估计，输出规则网格点图层（含 density 属性，值越大越密集）。mode 指定展示方式。默认 radiusMeters 5000、cellSizeMeters 500、mode plane。',
+    description: COMMON + '对点图层做 quartic 核密度估计，输出规则网格点图层（含 density 属性，值越大越密集）。mode 指定展示方式。默认 radiusMeters 5000、cellSizeMeters 500、mode plane。'
+    + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       radiusMeters: { type: 'number', description: '核带宽（米），默认 5000' },
@@ -128,17 +130,27 @@ export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
       },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const radius = typeof args.radiusMeters === 'number' ? args.radiusMeters : 5000
       const cell = typeof args.cellSizeMeters === 'number' ? args.cellSizeMeters : 500
       const mode: DisplayMode = args.mode === 'hex' || args.mode === 'points' ? args.mode : 'plane'
-      const res = opKernelDensity(layer.geojson, radius, cell)
-      if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
+      // ⚠️ scale 必须用 layerScale（totalCount ?? featureCount）：统计类对抽样层是"警告而非拒绝"，
+      // 而抽样层的 geojson.features.length 只是上图子集，用它会把大图层判成小的、恰好跳过隔离。
+      const r = await runGeoOp<ReturnType<typeof opKernelDensity>>({
+        exec,
+        job: { kind: 'kernelDensity', geojson: layer.geojson, radius, cell },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opKernelDensity(layer.geojson, radius, cell),
+        scale: layerScale(layer),
+      })
+      if (!r.ok) return r // 派发层拦下的（超时/取消/异常）
+      const res = r.value
+      if (!res.ok) return Promise.resolve({ ok: false, message: res.message }) // op 自己的业务失败（如网格过密）
       const out = pushResult('核密度', res.geojson, layer.name, mode)
       const sampleNote = layer.materialized === false ? `（注意：基于上图抽样子集计算，共 ${layer.totalCount ?? '?'} 行、上图 ${layer.featureCount} 行）` : ''
       return Promise.resolve({ ...out, message: `${out.message}。展示方式：${MODE_LABEL[mode]}。${sampleNote}${REMINDER}` })
@@ -147,16 +159,25 @@ export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_average_nearest_neighbor',
-    description: COMMON + '计算平均最近邻指数（ANN）：r<1 呈聚集、r≈1 随机、r>1 分散。返回统计值（不生成新图层）。',
+    description: COMMON + '计算平均最近邻指数（ANN）：r<1 呈聚集、r≈1 随机、r>1 分散。返回统计值（不生成新图层）。'
+    + ISOLATED_NOTE,
     parameters: { layer: LAYER_PARAM },
     output: { schema: STAT_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const res = opAverageNearestNeighbor(layer.geojson)
+      const r = await runGeoOp<ReturnType<typeof opAverageNearestNeighbor>>({
+        exec,
+        job: { kind: 'ann', geojson: layer.geojson },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opAverageNearestNeighbor(layer.geojson),
+        scale: layerScale(layer),
+      })
+      if (!r.ok) return r
+      const res = r.value
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       const annSample = layer.materialized === false ? `（基于抽样 ${layer.featureCount}/${layer.totalCount ?? '?'} 行）` : ''
       return Promise.resolve({
@@ -276,29 +297,39 @@ export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
       + '计算全局 Moran I：I>0 空间正自相关（同值聚集）、I≈0 随机、I<0 负自相关。'
       + '权重可选 queen（面共边/共点，默认）/rook（面仅共边）/distance（距离阈值内，需 distanceMeters）/knn（最近 K 个邻居，默认 5）；'
       + '点/线图层自动用 knn。permutations>0 时用置换检验（固定 seed 可复现），更可靠。'
-      + '【流程要求】应先经 webgis_moran_inspect 体检并把候选字段/参数交用户确认后再调用本工具；返回统计值，不生成新图层。',
+      + '【流程要求】应先经 webgis_moran_inspect 体检并把候选字段/参数交用户确认后再调用本工具；返回统计值，不生成新图层。'
+      + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       field: { type: 'string', required: true, description: '数值属性字段（如人口、密度）' },
       ...WEIGHT_PARAMS,
     },
     output: { schema: STAT_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 60000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.stat,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const field = typeof args.field === 'string' ? args.field : ''
       if (!field) return Promise.resolve({ ok: false, message: 'field 不能为空' })
       const weight = typeof args.weight === 'string' ? args.weight as WeightType : undefined
-      const res = opMoranI(layer.geojson, field, {
+      const options = {
         ...(weight ? { type: weight } : {}),
         ...(typeof args.distanceMeters === 'number' ? { distanceMeters: args.distanceMeters } : {}),
         ...(typeof args.k === 'number' ? { k: args.k } : {}),
         ...(typeof args.permutations === 'number' ? { permutations: args.permutations } : {}),
         ...(typeof args.seed === 'number' ? { seed: args.seed } : {}),
+      }
+      const r = await runGeoOp<ReturnType<typeof opMoranI>>({
+        exec,
+        job: { kind: 'moran', geojson: layer.geojson, field, options },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.stat),
+        sync: () => opMoranI(layer.geojson, field, options),
+        scale: layerScale(layer),
       })
+      if (!r.ok) return r
+      const res = r.value
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       const moranSample = layer.materialized === false ? `（注意：基于上图抽样子集计算，共 ${layer.totalCount ?? '?'} 行、上图 ${layer.featureCount} 行——抽样会破坏空间自相关，结论不可靠）` : ''
       const sig = res.p < 0.05 ? '显著' : '不显著'
@@ -324,7 +355,8 @@ export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
       + '（HH=高值被高值包围、LL=低值被低值包围、HL=高值被低值包围、LH=低值被高值包围、nonsig=不显著），'
       + '用于看「哪里聚集」。权重与检验参数同 webgis_moran_i。'
       + '【流程要求】应先经 webgis_moran_inspect 体检并把候选字段/参数交用户确认后再调用。'
-      + '返回新图层（可切展示方式按 class 查看），并汇总四类要素数。',
+      + '返回新图层（可切展示方式按 class 查看），并汇总四类要素数。'
+      + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       field: { type: 'string', required: true, description: '数值属性字段（如人口、密度）' },
@@ -336,23 +368,32 @@ export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
       },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 120000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.local,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const field = typeof args.field === 'string' ? args.field : ''
       if (!field) return Promise.resolve({ ok: false, message: 'field 不能为空' })
       const weight = typeof args.weight === 'string' ? args.weight as WeightType : undefined
-      const res = opLocalMoranI(layer.geojson, field, {
+      const options = {
         ...(weight ? { type: weight } : {}),
         ...(typeof args.distanceMeters === 'number' ? { distanceMeters: args.distanceMeters } : {}),
         ...(typeof args.k === 'number' ? { k: args.k } : {}),
         ...(typeof args.permutations === 'number' ? { permutations: args.permutations } : {}),
         ...(typeof args.seed === 'number' ? { seed: args.seed } : {}),
         ...(typeof args.alpha === 'number' ? { alpha: args.alpha } : {}),
+      }
+      const r = await runGeoOp<ReturnType<typeof opLocalMoranI>>({
+        exec,
+        job: { kind: 'localMoran', geojson: layer.geojson, field, options },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.local),
+        sync: () => opLocalMoranI(layer.geojson, field, options),
+        scale: layerScale(layer),
       })
+      if (!r.ok) return r
+      const res = r.value
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       const mode = typeof args.mode === 'string' ? args.mode as DisplayMode : undefined
       const out = pushResult(`LISA - ${field}`, res.geojson, layer.name, mode)

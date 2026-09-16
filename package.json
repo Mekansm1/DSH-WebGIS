@@ -1,6 +1,6 @@
 {
   "name": "dsh-webgis",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "DeepSeek Harness (DSH) WebGIS Plugin: Map reading, map manipulation, and 3D world comprehension.",
   "keywords": [
     "dsh",
@@ -9,6 +9,14 @@
     "GIS agent"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mekansm1/DSH-WebGIS.git"
+  },
+  "homepage": "https://github.com/Mekansm1/DSH-WebGIS#readme",
+  "bugs": {
+    "url": "https://github.com/Mekansm1/DSH-WebGIS/issues"
+  },
   "author": "Frank Wang <cywanghn@gmail.com>",
   "type": "module",
   "main": "lib/index.js",

@@ -1,15 +1,19 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { polygon, featureCollection, feature, point } from '@turf/helpers'
-import { makeResultLayer } from '../lib/geo-processing.js'
+import { makeResultLayer, regularGridCellCount } from '../lib/geo-processing.js'
 import { registerGeoTools } from '../lib/geo-tools.js'
+import { createGeoToolRuntime } from '../lib/geo-tools-runtime.js'
+import { runGeoJobLocal } from '../lib/geo-job-ops.js'
+import { GeoJobAbortedError } from '../lib/geo-jobs.js'
+import { GEO_JOB_GATE, GEO_TOOL_TIMEOUTS } from '../lib/geo-job-policy.js'
 
 function square(w, s, e, n, props = {}) {
   return polygon([[[w, s], [e, s], [e, n], [w, n], [w, s]]], props)
 }
 
 /** 造一个捕获了工具注册的假 ctx + 按会话隔离的注册表状态（模拟 host 的 SessionStateStore）。 */
-function setup(initialLayers = []) {
+function setup(initialLayers = [], deps = undefined) {
   const defs = []
   const ctx = { tools: { register: (d) => defs.push(d) } }
   const states = new Map()
@@ -22,14 +26,35 @@ function setup(initialLayers = []) {
     }
     return st
   }
-  registerGeoTools(ctx, stateFor)
+  // ⚠️ 第 3 个参数（hooks）必须显式占位：写成 registerGeoTools(ctx, stateFor, deps) 会把 deps
+  // 送到 hooks 位上，deps 静默为 undefined —— 于是 worker 分支全部不可达，测试却照常"通过"。
+  registerGeoTools(ctx, stateFor, undefined, deps)
   const tool = (name) => {
     const d = defs.find((x) => x.name === name)
     assert.ok(d, `未找到工具 ${name}`)
     return d
   }
-  const run = (name, args, sid) => tool(name).execute(args, { agent: sid ? { id: sid } : undefined })
+  const run = (name, args, sid, execExtra = {}) =>
+    tool(name).execute(args, { agent: sid ? { id: sid } : undefined, ...execExtra })
   return { defs, states, stateFor, state: stateFor(undefined), tool, run }
+}
+
+/**
+ * 注入 **stub 执行器** 的 harness：不启真 worker，直接在主线程调 `runGeoJobLocal`。
+ *
+ * 这样 14 条 worker 分支能在毫秒级被覆盖（真 worker 有启动成本，只留给 geo-jobs.test.mjs）。
+ * 它同时记录了每次派发的 `timeoutMs` 与 `signal`，用来验收"预算同源"与"信号透传"。
+ */
+function setupWithStubRunner(initialLayers = [], onJob = undefined) {
+  const calls = []
+  const deps = {
+    runGeoJob: async (job, timeoutMs, opts) => {
+      calls.push({ job, timeoutMs, signal: opts?.signal })
+      if (onJob) return onJob(job, timeoutMs, opts)
+      return runGeoJobLocal(job)
+    },
+  }
+  return { ...setup(initialLayers, deps), calls }
 }
 
 const polygonLayer = makeResultLayer({
@@ -154,6 +179,18 @@ test('dissolve 按字段分组产出多要素', async () => {
   const out = await run('webgis_dissolve', { layer: 'dataset', field: 'group' })
   assert.equal(out.ok, true)
   assert.equal(out.featureCount, 2)
+})
+
+test('dissolve 不再按固定要素数拒绝：是否终止由隔离任务的时限决定', async () => {
+  const many = makeResultLayer({
+    id: 'dataset', name: '道路缓冲',
+    geojson: featureCollection(Array.from({ length: 1001 }, (_, i) => square(i, 0, i + 0.5, 0.5))),
+    source: 'gis-result',
+  })
+  const { state, run } = setup([many])
+  const out = await run('webgis_dissolve', { layer: 'dataset' })
+  assert.equal(out.ok, true)
+  assert.equal(state.layers.length, 2)
 })
 
 test('select_by_value 缺字段 → ok:false', async () => {
@@ -781,4 +818,201 @@ test('webgis_moran_i：weight=distance 需阈值；点图层默认 knn 可算', 
   const knnRes = await run('webgis_moran_i', { layer: 'ds_pts', field: 'v' })
   assert.equal(knnRes.ok, true)
   assert.equal(knnRes.value.weight, 'knn')
+})
+
+// ---------------------------------------------------------------------------
+// 隔离派发：门控分流 / 预算同源 / 信号透传 / 取消不写图层 / 错误形态统一
+// ---------------------------------------------------------------------------
+
+/** 一个"规模很大但几何很小"的图层：用来只测**路由决策**，不真造几十万要素。 */
+function bigLayer(id, name, geojson, totalCount) {
+  return makeResultLayer({ id, name, source: 'gis-result', geojson, totalCount })
+}
+
+const pointLayerForAnn = makeResultLayer({
+  id: 'result_pts', name: '点位', source: 'gis-result',
+  geojson: featureCollection([point([0, 0]), point([1, 1]), point([2, 2]), point([3, 3])]),
+})
+
+test('门控：小图层在主线程直算，不调隔离执行器', async () => {
+  const { run, calls } = setupWithStubRunner([polygonLayer])
+  const out = await run('webgis_dissolve', { layer: 'dataset' })
+  assert.equal(out.ok, true, out.message)
+  assert.equal(calls.length, 0, '2 个要素远低于 dissolve 阈值(2000)，不该隔离')
+})
+
+test('门控：大图层才隔离，且预算与工具 timeoutMs 同源、signal 原样透传', async () => {
+  // 阈值从 GEO_JOB_GATE 取，不写死数字 —— 否则每次重新标定这条都会红
+  const big = bigLayer('result_big', '大层', polygonLayer.geojson, GEO_JOB_GATE.dissolve.min)
+  const { run, calls } = setupWithStubRunner([big])
+  const ac = new AbortController()
+  const out = await run('webgis_dissolve', { layer: 'result_big' }, undefined, { signal: ac.signal })
+  assert.equal(out.ok, true, out.message)
+  assert.equal(calls.length, 1, `规模恰好等于阈值(${GEO_JOB_GATE.dissolve.min})，应走隔离`)
+  assert.equal(calls[0].timeoutMs, GEO_TOOL_TIMEOUTS.op - 2000, 'worker 预算必须 = 工具预算 − 2000')
+  assert.equal(calls[0].signal, ac.signal, 'exec.signal 必须原样透传（同一对象，不是副本）')
+})
+
+test('门控判据用 totalCount：抽样层不能被当成小图层（最容易搞反的一条）', async () => {
+  // 同一个 geojson，一个声明真实 5 万行、一个没声明 —— 前者必须隔离，后者不必
+  const sampled = bigLayer('result_sampled', '抽样层', polygonLayer.geojson, GEO_JOB_GATE.dissolve.min * 2)
+  const plain = bigLayer('result_plain', '普通层', polygonLayer.geojson, undefined)
+  const a = setupWithStubRunner([sampled])
+  await a.run('webgis_dissolve', { layer: 'result_sampled' })
+  assert.equal(a.calls.length, 1, 'totalCount 越线应隔离（用 featureCount=2 就会漏判）')
+  const b = setupWithStubRunner([plain])
+  await b.run('webgis_dissolve', { layer: 'result_plain' })
+  assert.equal(b.calls.length, 0, '无 totalCount 时按 featureCount=2 判，不隔离')
+})
+
+test('取消：上游 abort 时返回 ok:false，且**不写入任何图层**', async () => {
+  const big = bigLayer('result_big2', '大层', polygonLayer.geojson, GEO_JOB_GATE.dissolve.min)
+  const { run, state } = setupWithStubRunner([big], () => { throw new GeoJobAbortedError() })
+  const before = state.layers.length
+  const out = await run('webgis_dissolve', { layer: 'result_big2' })
+  assert.equal(out.ok, false, '取消必须返回 ok:false')
+  assert.match(out.message, /已取消/)
+  assert.equal(state.layers.length, before, '取消后不得留下"模型认为不存在"的图层')
+})
+
+test('错误形态统一：隔离路径下，原本没有 try/catch 的工具也返回 {ok:false} 而不是抛异常', async () => {
+  // buffer / simplify / average_nearest_neighbor 都在原先那 7 个「无 try/catch」的名单里。
+  // 改动前隔离任务的失败会让异常**逃出 execute()**（变 isError 工具调用失败），
+  // 拿不到项目统一的中文结果，而且不同工具形态还不一样。
+  // ⚠️ 阈值各不同：buffer/simplify 是 20000，ann 是 2000 —— 数据要按各自阈值造。
+  const boom = () => { throw new Error('模拟算子异常') }
+  const bigPoly = bigLayer('result_bigp', '大面层', polygonLayer.geojson, 50_000)
+  const bigPts = bigLayer('result_bigpt', '大点层', pointLayerForAnn.geojson, 5_000)
+  const { run } = setupWithStubRunner([bigPoly, bigPts], boom)
+  const cases = [
+    ['webgis_buffer', { layer: 'result_bigp', distance: 100, unit: 'meters' }],
+    ['webgis_simplify', { layer: 'result_bigp', tolerance: 0.01 }],
+    ['webgis_average_nearest_neighbor', { layer: 'result_bigpt' }],
+  ]
+  for (const [name, args] of cases) {
+    const out = await run(name, args)
+    assert.equal(out.ok, false, `${name} 应返回 ok:false 而不是抛异常`)
+    assert.equal(typeof out.message, 'string')
+    assert.match(out.message, /模拟算子异常/, `${name} 的报错应带上原因`)
+  }
+})
+
+test('错误形态统一：直算路径同样在同一个 try 里（sync 抛异常也收成 ok:false）', async () => {
+  // 直接在运行时层测，不绕工具 schema —— 框架会先按 enum 校验参数，
+  // 用"非法 unit"这类输入根本到不了算子，测不到 sync 分支。
+  const rt = createGeoToolRuntime(() => ({ layers: [] }))
+  const job = { kind: 'buffer', layer: { geojson: polygonLayer.geojson }, distance: 1, unit: 'meters' }
+  const r = await rt.runGeoOp({
+    exec: {},
+    job,
+    budgetMs: 28_000,
+    sync: () => { throw new Error('同步侧失败') },
+    scale: 1, // 远低于阈值 → 走 sync 分支
+  })
+  assert.equal(r.ok, false, 'sync 抛异常必须被收成 ok:false')
+  assert.match(r.message, /同步侧失败/)
+  // 对照：同一个 runGeoOp，sync 正常时返回 ok:true + 值
+  const ok = await rt.runGeoOp({ exec: {}, job, budgetMs: 28_000, sync: () => ({ done: true }), scale: 1 })
+  assert.deepEqual(ok, { ok: true, value: { done: true } })
+})
+
+test('错误形态统一：隔离路径与直算路径给出同一种**信封形状**', async () => {
+  const rt = createGeoToolRuntime(() => ({ layers: [] }))
+  const job = { kind: 'buffer', layer: { geojson: polygonLayer.geojson }, distance: 1, unit: 'meters' }
+  const viaLocal = await rt.runGeoOp({
+    exec: {}, job, budgetMs: 28_000, sync: () => { throw new Error('直算侧失败') }, scale: 1,
+  })
+  const big = bigLayer('result_big3', '大层', polygonLayer.geojson, GEO_JOB_GATE.buffer.min)
+  const viaIsolate = await setupWithStubRunner([big], () => { throw new Error('隔离侧失败') })
+    .run('webgis_buffer', { layer: 'result_big3', distance: 1, unit: 'meters' })
+  for (const [label, out] of [['直算', viaLocal], ['隔离', viaIsolate]]) {
+    assert.equal(out.ok, false, `${label}路径应 ok:false`)
+    assert.equal(typeof out.message, 'string', `${label}路径应带 message`)
+    assert.ok(out.message.length > 0, `${label}路径的 message 不该为空`)
+    assert.equal('layerId' in out, false, `${label}路径失败时不该带 layerId`)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 规则格网 / 泰森多边形：迁移到隔离执行 + 格数硬上限
+// ---------------------------------------------------------------------------
+
+test('规则格网：格数超过上限时拒绝，并给出可直接照做的 cellSize 建议', async () => {
+  const { run } = setup()
+  // 全国范围 + 极小格距 → 天文数字的格子
+  const out = await run('webgis_regular_grid', { bbox: [73, 18, 135, 54], cellSize: 0.0001, unit: 'degrees' })
+  assert.equal(out.ok, false, '荒谬输入必须被拒绝，而不是等 OOM')
+  assert.match(out.message, /格网过密/)
+  assert.match(out.message, /cellSize/, '要告诉用户改哪个参数')
+  assert.match(out.message, /缩小 bbox/, '也要给出另一个可行方向')
+  // 建议值必须是可解析的数字，用户照着填就能过
+  const m = /调大到 ([\d.]+)/.exec(out.message)
+  assert.ok(m, `建议值应出现在文案里：${out.message}`)
+  assert.ok(Number(m[1]) > 0.0001)
+})
+
+test('规则格网：小格网在主线程直算，格子数与 turf 生成的一致', async () => {
+  const { run, calls } = setupWithStubRunner([])
+  const bbox = [113, 23, 113.1, 23.1]
+  const out = await run('webgis_regular_grid', { bbox, cellSize: 0.01, unit: 'degrees' })
+  assert.equal(out.ok, true, out.message)
+  // 用**同一个** regularGridCellCount 断言，而不是手算 10×10 ——
+  // turf 内部是 Math.floor(|宽| / cellDeg)，而 (113.1-113)/0.01 = 9.999999999999998 → 9 列，
+  // 所以实际是 9×10=90 而不是 100。手算会把浮点行为当成 bug。
+  const cells = regularGridCellCount(bbox, 0.01, 'degrees')
+  assert.equal(out.featureCount, cells)
+  assert.ok(cells < 2000, `前置：这组参数应低于隔离阈值（实际 ${cells} 格）`)
+  assert.equal(calls.length, 0, '格数低于阈值 → 门控应让它留在主线程直算')
+})
+
+test('规则格网：中等格网在主线程直算（生成近乎免费，隔离只会加 169ms 延迟）', async () => {
+  // 实测：20,000 格只要 2ms，而隔离固定成本 169ms —— 所以门控阈值定在 100 万格量级。
+  // 工具层造不出百万格的真格网（stub 会真的生成它们），所以"越线才派发"由 policy 测试钉，
+  // 这里钉相反的一面：中等格网**不该**被送去隔离。
+  const { run, calls } = setupWithStubRunner([])
+  const out = await run('webgis_regular_grid', { bbox: [113, 23, 114, 24], cellSize: 0.02, unit: 'degrees' })
+  assert.equal(out.ok, true, out.message)
+  assert.equal(calls.length, 0, '约 2500 格远低于阈值，应留主线程')
+})
+
+test('规则格网：cellSize 非法时给中文提示，不抛异常', async () => {
+  const { run } = setup()
+  for (const bad of [0, -1]) {
+    const out = await run('webgis_regular_grid', { bbox: [0, 0, 1, 1], cellSize: bad, unit: 'degrees' })
+    assert.equal(out.ok, false)
+    assert.match(out.message, /cellSize/)
+  }
+})
+
+test('泰森多边形：≥3 点可执行；小图层不隔离（门控正确留在主线程）', async () => {
+  const pts = makeResultLayer({
+    id: 'result_pts3', name: '四点', source: 'gis-result',
+    geojson: featureCollection([point([113, 23]), point([113.1, 23.1]), point([113.2, 23]), point([113.3, 23.2])]),
+  })
+  const two = makeResultLayer({
+    id: 'result_pts2', name: '两点', source: 'gis-result',
+    geojson: featureCollection([point([113, 23]), point([113.1, 23.1])]),
+  })
+  const { run, calls } = setupWithStubRunner([pts, two])
+  const ok = await run('webgis_voronoi', { layer: 'result_pts3' })
+  assert.equal(ok.ok, true, ok.message)
+  assert.equal(ok.featureCount, 4, '每点一个面')
+  assert.equal(calls.length, 0, '4 个点远低于阈值(2000)，门控应让它留在主线程直算')
+  const bad = await run('webgis_voronoi', { layer: 'result_pts2' })
+  assert.equal(bad.ok, false)
+  assert.match(bad.message, /至少需要 3 个点/)
+})
+
+test('泰森多边形：大图层才走隔离，且 job 形状正确', async () => {
+  const big = makeResultLayer({
+    id: 'result_bigv', name: '大点层', source: 'gis-result',
+    geojson: featureCollection([point([113, 23]), point([113.1, 23.1]), point([113.2, 23]), point([113.3, 23.2])]),
+    totalCount: 600_000,
+  })
+  const { run, calls } = setupWithStubRunner([big])
+  const out = await run('webgis_voronoi', { layer: 'result_bigv', bbox: [112, 22, 114, 24] })
+  assert.equal(out.ok, true, out.message)
+  assert.equal(calls.length, 1, 'totalCount=60万 应走隔离')
+  assert.equal(calls[0].job.kind, 'voronoi')
+  assert.deepEqual(calls[0].job.bbox, [112, 22, 114, 24], 'bbox 是「无几何输入」之外唯一的空间参数，必须原样带上')
 })

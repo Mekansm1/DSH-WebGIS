@@ -15,12 +15,13 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { GisLayer } from './geo-processing.js'
 import { fieldLine, inspectFields } from './geo-stats-tools.js'
+import { GEO_TOOL_TIMEOUTS, layerScale, workerBudget } from './geo-job-policy.js'
 import {
   INDEX_SPECS, findIndexSpec, formatVerdict, geometryFamily, isMissingDecision, judgeIndex,
   opGetisOrd, opGini, opShannon,
   type LayerShape, type MissingPolicy,
 } from './geo-indices.js'
-import type { GeoToolRuntime } from './geo-tools-runtime.js'
+import { ISOLATED_NOTE, type GeoToolRuntime } from './geo-tools-runtime.js'
 
 const FAMILY_LABEL: Record<string, string> = { point: '点', polygon: '面', line: '线', mixed: '混杂', none: '无几何' }
 
@@ -56,7 +57,7 @@ function shapeOf(layer: GisLayer): LayerShape {
 }
 
 export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
-  const { sess, COMMON, REMINDER, LAYER_RESULT_SCHEMA, STAT_RESULT_SCHEMA, text } = rt
+  const { sess, COMMON, REMINDER, LAYER_RESULT_SCHEMA, STAT_RESULT_SCHEMA, text, runGeoOp } = rt
 
   ctx.tools.register(defineTool({
     name: 'webgis_stat_inspect',
@@ -78,7 +79,7 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
     output: { schema: STAT_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { layers, resolve } = sess(exec)
       const targets = typeof args.layer === 'string' && args.layer
         ? (() => { const l = resolve(args.layer); return typeof l === 'string' ? l : [l] })()
@@ -309,7 +310,8 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
       + '生成带 gi_z / gi_p / gi_q / gi_class(hot|cold|ns) 的新图层，可直接上图看冷热点分布。'
       + '权重为二值邻接，默认面用 queen、点线用 knn k=5（需要 ≥6 个要素）；点/线若要素多建议改用 distance。'
       + 'p 用正态近似并做 Benjamini-Hochberg 假发现率校正（gi_q）——要素多时不做校正会冒出大量假热点。'
-      + '调用前应先经 webgis_stat_inspect 体检并把字段/权重给用户确认。',
+      + '调用前应先经 webgis_stat_inspect 体检并把字段/权重给用户确认。'
+      + ISOLATED_NOTE,
     parameters: {
       layer: { type: 'string', required: true, description: '目标图层 id' },
       field: { type: 'string', required: true, description: '要分析的数值字段（每个要素都要有值）' },
@@ -319,18 +321,27 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
       alpha: { type: 'number', description: '显著性水平（默认 0.05）' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 60000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.stat,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const res = opGetisOrd(layer.geojson, args.field, {
+      const options = {
         ...(args.weight === 'queen' || args.weight === 'rook' || args.weight === 'distance' || args.weight === 'knn' ? { type: args.weight } : {}),
         ...(typeof args.distanceMeters === 'number' ? { distanceMeters: args.distanceMeters } : {}),
         ...(typeof args.k === 'number' ? { k: args.k } : {}),
         ...(typeof args.alpha === 'number' ? { alpha: args.alpha } : {}),
+      }
+      const r = await runGeoOp<ReturnType<typeof opGetisOrd>>({
+        exec,
+        job: { kind: 'getisOrd', geojson: layer.geojson, field: args.field, options },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.stat),
+        sync: () => opGetisOrd(layer.geojson, args.field, options),
+        scale: layerScale(layer),
       })
+      if (!r.ok) return r
+      const res = r.value
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       const out = pushResult(`Gi*热点 - ${args.field}`, res.geojson, layer.name)
       const c = res.counts

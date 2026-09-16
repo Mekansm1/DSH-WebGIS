@@ -4,7 +4,18 @@ A WebGIS plugin that lets LLMs truly see the geographic world. Built on DeepSeek
 
 Author: Frank Wang · Feedback: [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
 
-## What's New in 0.1.3
+## What's New in 0.1.4
+
+- Added a Worker-based execution path for geometry and spatial-statistics operations, selected by operation-specific workload thresholds.
+- Worker jobs forward cancellation signals, enforce time budgets, and terminate on completion, cancellation or timeout. Plugin disposal requests cleanup of active workers and queued jobs.
+- Added transferable geometry payloads, bounded job concurrency, shared timeout policies, and regression tests for encoding, dispatch, cancellation and timeouts.
+- Added a regular-grid size guard with actionable input guidance.
+
+Scope: small workloads still execute synchronously on the host thread. Workload thresholds do not guarantee that every complex geometry runs off-thread; this release does not promise universally non-blocking execution. Worker payload encoding and result decoding also require host-thread work.
+
+Compatibility: this release targets the DSH **Web profile** and requires the host's `webServer` service. The official Desktop transport is **not yet supported**. The existing DSH `0.1.5-rc1` compatibility baseline is unchanged; this is not a claim of validation against newer Desktop releases.
+
+### What's New in 0.1.3
 
 - Migrated to DuckDB's official Node Neo driver (`@duckdb/node-api`). Installing the plugin no longer requires compiling the legacy `duckdb` native module, `pnpm approve-builds`, or `pnpm rebuild duckdb`.
 - Optimized very large CSV coordinate-point layers: DuckDB reads coordinates in columnar chunks and builds GeoArrow directly, avoiding huge numbers of `{ lon, lat }` JavaScript objects.

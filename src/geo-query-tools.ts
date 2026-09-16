@@ -12,10 +12,11 @@ import {
   requireField,
   requireMaterialized,
 } from './geo-processing.js'
-import type { GeoToolRuntime } from './geo-tools-runtime.js'
+import { ISOLATED_NOTE, type GeoToolRuntime } from './geo-tools-runtime.js'
+import { GEO_TOOL_TIMEOUTS, layerScale, workerBudget } from './geo-job-policy.js'
 
 export function registerQueryTools(ctx: Context, rt: GeoToolRuntime): void {
-  const { sess, COMMON, LAYER_RESULT_SCHEMA, LAYER_PARAM, text } = rt
+  const { sess, COMMON, LAYER_RESULT_SCHEMA, LAYER_PARAM, text, runGeoOp } = rt
 
   ctx.tools.register(defineTool({
     name: 'webgis_select_by_value',
@@ -58,7 +59,8 @@ export function registerQueryTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_spatial_join',
-    description: COMMON + '空间连接：对 target 每个要素统计与 joinLayer 中满足 relation 的要素数量，写入 _joinCount 属性（并复制首个匹配要素的 name 到 _joinName）。relation: contains=target 包含 join；within=target 位于 join 内；intersects=相交。',
+    description: COMMON + '空间连接：对 target 每个要素统计与 joinLayer 中满足 relation 的要素数量，写入 _joinCount 属性（并复制首个匹配要素的 name 到 _joinName）。relation: contains=target 包含 join；within=target 位于 join 内；intersects=相交。'
+    + ISOLATED_NOTE,
     parameters: {
       target: { type: 'string', required: true, description: '目标图层 id（其每个要素计算一次连接）' },
       joinLayer: { type: 'string', required: true, description: '连接图层 id' },
@@ -70,9 +72,9 @@ export function registerQueryTools(ctx: Context, rt: GeoToolRuntime): void {
       },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const target = resolve(args.target)
       if (typeof target === 'string') return Promise.resolve({ ok: false, message: target })
@@ -82,8 +84,16 @@ export function registerQueryTools(ctx: Context, rt: GeoToolRuntime): void {
       if (ferr) return Promise.resolve({ ok: false, message: ferr })
       const merr = requireMaterialized(target, '空间连接')
       if (merr) return Promise.resolve({ ok: false, message: merr })
-      const out = opSpatialJoin(target, join, args.relation as JoinRelation)
-      return Promise.resolve(pushResult('空间连接', out, `${target.name} ← ${join.name}`))
+      const r = await runGeoOp<ReturnType<typeof opSpatialJoin>>({
+        exec,
+        job: { kind: 'spatialJoin', target, join, relation: args.relation as JoinRelation },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opSpatialJoin(target, join, args.relation as JoinRelation),
+        // 双图层配对:判据是 pairs
+        scale: layerScale(target) * layerScale(join),
+      })
+      if (!r.ok) return r
+      return pushResult('空间连接', r.value, `${target.name} ← ${join.name}`)
     },
   }))
 }

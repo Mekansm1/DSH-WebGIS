@@ -8,19 +8,15 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { BBox } from 'geojson'
 import type { GisLayer, JoinRelation } from './geo-processing.js'
 import {
-  opAttributeJoin,
-  opRegularGrid,
-  opReproject,
-  opSelectByLocation,
-  opSmooth,
-  opVoronoi,
-  requireFeatures,
-  requireMaterialized,
+  opAttributeJoin, opRegularGrid, opReproject, opSelectByLocation, opSmooth,
+  opVoronoi, regularGridCellCount, regularGridTooDenseMessage, requireFeatures, requireMaterialized,
 } from './geo-processing.js'
-import type { GeoToolRuntime } from './geo-tools-runtime.js'
+import { MAX_REGULAR_GRID_CELLS } from './geo-limits.js'
+import { ISOLATED_NOTE, type GeoToolRuntime } from './geo-tools-runtime.js'
+import { GEO_TOOL_TIMEOUTS, layerScale, workerBudget } from './geo-job-policy.js'
 
 export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
-  const { sess, COMMON, LAYER_RESULT_SCHEMA, LAYER_PARAM, text } = rt
+  const { sess, COMMON, LAYER_RESULT_SCHEMA, LAYER_PARAM, text, runGeoOp } = rt
 
   ctx.tools.register(defineTool({
     name: 'webgis_smooth',
@@ -32,7 +28,7 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -59,7 +55,7 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -75,7 +71,10 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_regular_grid',
-    description: COMMON + '按 bbox 与格边长生成规则方格网（单位默认 kilometers），用于采样/统计。',
+    description: COMMON + '按 bbox 与格边长生成规则方格网（单位默认 kilometers），用于采样/统计。'
+      + '⚠ 格网规模由 bbox 与 cellSize 决定、与图层无关：格数超过 200 万会被拒绝并给出建议的 cellSize'
+      + '（cellSize 传得过小会瞬间产生上亿格子，直接耗尽内存）。'
+      + ISOLATED_NOTE,
     parameters: {
       bbox: { type: 'json', description: '范围 [west, south, east, north]（经纬度，w<e、s<n）' },
       cellSize: { type: 'number', required: true, description: '格边长（大于 0）' },
@@ -84,23 +83,37 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { pushResult } = sess(exec)
       const bbox = Array.isArray(args.bbox) && args.bbox.length === 4 ? args.bbox as unknown as BBox : null
-      if (!bbox) return Promise.resolve({ ok: false, message: 'bbox 必须为 [west, south, east, north] 四个数字' })
+      if (!bbox) return { ok: false, message: 'bbox 必须为 [west, south, east, north] 四个数字' }
       const cellSize = Number(args.cellSize)
       const unit = typeof args.unit === 'string' ? args.unit : 'kilometers'
-      try {
-        return Promise.resolve(pushResult('规则格网', opRegularGrid(bbox, cellSize, unit), 'bbox'))
-      } catch (err) {
-        return Promise.resolve({ ok: false, message: err instanceof Error ? err.message : String(err) })
+      if (!Number.isFinite(cellSize) || cellSize <= 0) {
+        return { ok: false, message: 'cellSize 必须是大于 0 的数字' }
       }
+      // 防荒谬输入(**不是**性能门控):本算子的规模与图层无关 —— cellSize 传 0.0001 覆盖全国
+      // 就是 10⁸ 个格子,会在主线程直接 OOM,而 timeoutMs 对同步代码毫无作用。必须在派发前拒绝。
+      const cells = regularGridCellCount(bbox, cellSize, unit)
+      if (cells > MAX_REGULAR_GRID_CELLS) {
+        return { ok: false, message: regularGridTooDenseMessage(cells, bbox, unit) }
+      }
+      const r = await runGeoOp<ReturnType<typeof opRegularGrid>>({
+        exec,
+        job: { kind: 'regularGrid', bbox, cellSize, unit },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opRegularGrid(bbox, cellSize, unit),
+        scale: cells, // 已算过，直接给；否则 estimateScale 会再算一遍（同一条公式）
+      })
+      if (!r.ok) return r
+      return pushResult('规则格网', r.value, 'bbox')
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'webgis_voronoi',
-    description: COMMON + '对点图层生成泰森多边形（Voronoi），每点一个面（范围默认图层外扩 10%，可传 bbox 限定）。',
+    description: COMMON + '对点图层生成泰森多边形（Voronoi），每点一个面（范围默认图层外扩 10%，可传 bbox 限定）。'
+    + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       bbox: { type: 'json', description: '计算范围 [west, south, east, north]（可选）' },
@@ -108,7 +121,7 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -117,11 +130,15 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       const merr = requireMaterialized(layer, '泰森多边形')
       if (merr) return Promise.resolve({ ok: false, message: merr })
       const bbox = Array.isArray(args.bbox) && args.bbox.length === 4 ? args.bbox as unknown as BBox : undefined
-      try {
-        return Promise.resolve(pushResult('泰森多边形', opVoronoi(layer, bbox), layer.name))
-      } catch (err) {
-        return Promise.resolve({ ok: false, message: err instanceof Error ? err.message : String(err) })
-      }
+      const r = await runGeoOp<ReturnType<typeof opVoronoi>>({
+        exec,
+        job: { kind: 'voronoi', layer, ...(bbox ? { bbox } : {}) },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opVoronoi(layer, bbox),
+        scale: layerScale(layer),
+      })
+      if (!r.ok) return r
+      return pushResult('泰森多边形', r.value, layer.name)
     },
   }))
 
@@ -164,7 +181,8 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
     description: COMMON + '【按位置筛选·普通图层】保留与 overlay 图层（任一要素满足）或 bbox 满足空间关系的要素。relation：contains（含）/within（在内）/intersects（相交）。overlay 与 bbox 二选一。'
       + '⚠ 适用范围：**已全量物化的图层**（webgis_list_layers 里 materialized=true）；materialized=false 的大图层在显示抽样上算会失真，'
       + '本工具会直接拒绝——要按全表筛围栏/半径请用 webgis_spatial_filter。'
-      + '按**属性值**筛选请用 webgis_select_by_value（本工具只管空间关系）。',
+      + '按**属性值**筛选请用 webgis_select_by_value（本工具只管空间关系）。'
+      + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       relation: { type: 'string', enum: ['contains', 'within', 'intersects'], description: '空间关系（默认 intersects）' },
@@ -172,9 +190,9 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       bbox: { type: 'json', description: '或 bbox [west, south, east, north]' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -188,11 +206,23 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       if (hasOverlay === Boolean(bbox)) return Promise.resolve({ ok: false, message: 'overlay 与 bbox 必须且只能提供一个' })
       const overlay = hasOverlay ? resolve(args.overlay) : undefined
       if (hasOverlay && typeof overlay === 'string') return Promise.resolve({ ok: false, message: overlay })
-      try {
-        return Promise.resolve(pushResult('位置筛选', opSelectByLocation(layer, relation, overlay as GisLayer | undefined, bbox), layer.name))
-      } catch (err) {
-        return Promise.resolve({ ok: false, message: err instanceof Error ? err.message : String(err) })
-      }
+      const ov = overlay && typeof overlay !== 'string' ? overlay : undefined
+      const r = await runGeoOp<ReturnType<typeof opSelectByLocation>>({
+        exec,
+        job: {
+          kind: 'selectByLocation',
+          layer,
+          relation,
+          ...(ov ? { overlay: ov } : {}),
+          ...(bbox ? { bbox: bbox as [number, number, number, number] } : {}),
+        },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opSelectByLocation(layer, relation, overlay as GisLayer | undefined, bbox),
+        // 有 overlay 才是双图层配对；只给 bbox 时是单图层。
+        scale: ov ? layerScale(layer) * layerScale(ov) : layerScale(layer),
+      })
+      if (!r.ok) return r
+      return pushResult('位置筛选', r.value, layer.name)
     },
   }))
 }

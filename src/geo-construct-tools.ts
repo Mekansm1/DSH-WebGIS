@@ -18,16 +18,18 @@ import {
   requireMaterialized,
   requirePolygonOnly,
 } from './geo-processing.js'
-import type { GeoToolRuntime } from './geo-tools-runtime.js'
+import { ISOLATED_NOTE, type GeoToolRuntime } from './geo-tools-runtime.js'
+import { GEO_TOOL_TIMEOUTS, layerScale, workerBudget } from './geo-job-policy.js'
 
 export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
-  const { sess, COMMON, LAYER_RESULT_SCHEMA, LAYER_PARAM, text } = rt
+  const { sess, COMMON, LAYER_RESULT_SCHEMA, LAYER_PARAM, text, runGeoOp } = rt
 
   ctx.tools.register(defineTool({
     name: 'webgis_buffer',
     description: COMMON + '对指定图层做缓冲区分析（buffer），结果生成新的面图层。distance 为缓冲区半径，unit 为半径单位。'
       + '⚠ **必须显式传 unit**：缺省是 kilometers，用户说「缓冲 500 米」而漏传 unit 会得到 500 公里（差 1000 倍）。'
-      + '用户用中文口语说「米/公里」时对应传 meters / kilometers，不要依赖默认值。',
+      + '用户用中文口语说「米/公里」时对应传 meters / kilometers，不要依赖默认值。'
+      + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       distance: { type: 'number', required: true, description: '缓冲区半径（大于 0）' },
@@ -38,9 +40,9 @@ export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
       },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -53,8 +55,15 @@ export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
         return Promise.resolve({ ok: false, message: 'distance 必须是大于 0 的数字' })
       }
       const unit = typeof args.unit === 'string' ? args.unit : 'kilometers'
-      const out = opBuffer(layer, distance, unit)
-      return Promise.resolve(pushResult('缓冲', out, layer.name))
+      const r = await runGeoOp<ReturnType<typeof opBuffer>>({
+        exec,
+        job: { kind: 'buffer', layer, distance, unit },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opBuffer(layer, distance, unit),
+        scale: layerScale(layer),
+      })
+      if (!r.ok) return r
+      return pushResult('缓冲', r.value, layer.name)
     },
   }))
 
@@ -112,15 +121,16 @@ export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_dissolve',
-    description: COMMON + '按属性字段合并相邻面要素（溶解）；不传 field 则把全部要素合并为一个。仅支持面要素。',
+    description: COMMON + '按属性字段合并相邻面要素（溶解）；不传 field 则把全部要素合并为一个。仅支持面要素。'
+      + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       field: { type: 'string', description: '按该属性字段分组溶解；省略则全图溶解为一个要素' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -135,22 +145,31 @@ export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
         const fieldErr = requireField(layer, field)
         if (fieldErr) return Promise.resolve({ ok: false, message: fieldErr })
       }
-      return Promise.resolve(pushResult('溶解', opDissolve(layer, field), layer.name))
+      const r = await runGeoOp<ReturnType<typeof opDissolve>>({
+        exec,
+        job: { kind: 'dissolve', layer, field },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opDissolve(layer, field),
+        scale: layerScale(layer),
+      })
+      if (!r.ok) return r
+      return pushResult('溶解', r.value, layer.name)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'webgis_simplify',
-    description: COMMON + '用 Douglas-Peucker 算法简化图层几何。tolerance 单位为坐标度数（WGS84，非米），建议从 0.001 起试。',
+    description: COMMON + '用 Douglas-Peucker 算法简化图层几何。tolerance 单位为坐标度数（WGS84，非米），建议从 0.001 起试。'
+    + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       tolerance: { type: 'number', required: true, description: '简化容差（坐标度数，大于 0）' },
       highQuality: { type: 'boolean', description: '是否高质量算法（更慢），默认 false' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
@@ -162,8 +181,15 @@ export function registerConstructTools(ctx: Context, rt: GeoToolRuntime): void {
       if (!Number.isFinite(tolerance) || tolerance <= 0) {
         return Promise.resolve({ ok: false, message: 'tolerance 必须是大于 0 的数字' })
       }
-      const out = opSimplify(layer, tolerance, args.highQuality === true)
-      return Promise.resolve(pushResult('简化', out, layer.name))
+      const r = await runGeoOp<ReturnType<typeof opSimplify>>({
+        exec,
+        job: { kind: 'simplify', layer, tolerance, highQuality: args.highQuality === true },
+        budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+        sync: () => opSimplify(layer, tolerance, args.highQuality === true),
+        scale: layerScale(layer),
+      })
+      if (!r.ok) return r
+      return pushResult('简化', r.value, layer.name)
     },
   }))
 

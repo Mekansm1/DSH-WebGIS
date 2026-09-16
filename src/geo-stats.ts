@@ -27,8 +27,11 @@ export function minMax(xs: readonly number[]): { min: number; max: number } {
 import { intersect as turfIntersect } from '@turf/intersect'
 import { bboxOf, geometryTypesOf } from './geo-processing.js'
 
-/** 核密度网格上限（防 runaway）。 */
-export const MAX_GRID_CELLS = 40000
+// 规模上限已收进 geo-limits.ts（零 import 的纯常量模块，避免跨模块依赖绕成环）。
+// 这里 import + 再导出：import 供本文件自己用，export 让既有
+// `import { MAX_GRID_CELLS } from './geo-stats.js'` 保持可用（`export ... from` 不会引入本地绑定）。
+import { KNN_MAX_N, MAX_GRID_CELLS } from './geo-limits.js'
+export { KNN_MAX_N, MAX_GRID_CELLS }
 
 const DEG_LAT_PER_M = 1 / 110540
 function degLonPerM(lat: number): number {
@@ -251,8 +254,6 @@ export function defaultWeightFor(types: string[]): WeightType {
   return types.length > 0 && types.every((t) => t === 'Polygon' || t === 'MultiPolygon') ? 'queen' : 'knn'
 }
 
-/** knn 可支持的最大要素数（O(n²) 排序；超过请改用 distance/queen）。 */
-const KNN_MAX_N = 5000
 /** 置换检验默认/上限次数。 */
 export const PERMUTATIONS_DEFAULT = 999
 export const PERMUTATIONS_MAX = 9999

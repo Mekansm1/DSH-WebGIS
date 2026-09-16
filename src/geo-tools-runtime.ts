@@ -9,6 +9,8 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { BBox, FeatureCollection } from 'geojson'
 import type { DisplayMode, GisLayer, ModeParams } from './geo-processing.js'
+import type { GeoWorkerJob } from './geo-job-ops.js'
+import { shouldIsolate } from './geo-job-policy.js'
 import type { ThematicSpec } from './thematic.js'
 import { RESULT_COLORS, makeResultLayer, requireLayer } from './geo-processing.js'
 import { normalizeColor } from './postgis.js'
@@ -58,9 +60,16 @@ type PushResultFn = (
   extra?: ResultLayerExtra,
 ) => PushResultOutput
 
-/** 工具 execute 的 exec 形参里本层只依赖 agent.id。 */
+/**
+ * 工具 execute 的 exec 形参里本层依赖的部分。
+ *
+ * `signal` 对应框架 `ToolRunContext.signal`(`dsh-tools` 类型文档:声明了 `timeoutMs` 就等于
+ * 承诺把这个信号转发给"能在 abort 时收敛"的实现)。声明为**可选**是为了让测试里的假 exec
+ * (`{ agent: ... }`)继续可用。
+ */
 export interface ToolExec {
   agent?: { id?: string }
+  signal?: AbortSignal
 }
 
 /** 图层生命周期钩子（index.ts 接线，用于联动释放图层引用的外部资源，如 DuckDB 内存表）。 */
@@ -114,6 +123,15 @@ export function text(content: string): ContentBlock[] {
 }
 
 export const COMMON = '作用于当前 GIS 图层。图层 id 一律以 webgis_list_layers 返回为准（配置里的基础数据集=dataset；加载与工具产物形如 ds_<n>、csv_<n>、db_<n>、import_<n>、result_<n>）。'
+
+/**
+ * 「会隔离执行的重计算工具」共用的描述后缀。
+ *
+ * 为什么必须写进描述(而不只是代码里):这些工具现在**大图层走独立任务、超时会被停止**,
+ * 而模型需要知道这件事才能如实告诉用户"这个可能要等一会儿 / 可以停" ——
+ * 否则它只能自己臆测耗时,或者把中止说成失败。ARCHITECTURE 有硬规定:改工具行为必须同步改描述。
+ */
+export const ISOLATED_NOTE = '计算在独立任务中执行：大图层不会卡住对话；超时会自动停止且不产生半成品图层。'
 
 /** 展示方式中文名。points/plane/hex=maplibre 原生；arc/trips/wall/radial=deck.gl 出图。 */
 export const MODE_LABEL: Record<DisplayMode, string> = {
@@ -256,7 +274,33 @@ export type FullTableAttrFilter = (
 export interface GeoToolDeps {
   /** 大图层属性筛选下推到 DuckDB 全表。 */
   attrFilterFullTable?: FullTableAttrFilter
+  /**
+   * 重 Turf/统计运算的隔离执行器。未注入时（旧宿主/单测）保持同步兼容。
+   * `timeoutMs` 应取自 `workerBudget(GEO_TOOL_TIMEOUTS.x)` —— 见 `runGeoOp`。
+   */
+  runGeoJob?: <T>(job: GeoWorkerJob, timeoutMs: number, opts?: { signal?: AbortSignal }) => Promise<T>
 }
+
+/** 一次重计算的派发请求（`runGeoOp` 的入参）。 */
+export interface GeoOpRequest<T> {
+  exec: ToolExec
+  job: GeoWorkerJob
+  /** 隔离执行的预算，用 `workerBudget(GEO_TOOL_TIMEOUTS.x)` 得到（与工具的 timeoutMs 同源）。 */
+  budgetMs: number
+  /**
+   * 主线程直算的闭包，**必须与 job 同语义**。两者的一致性由 `geo-job-ops.ts` 的同一个
+   * `runGeoJobLocal` switch 保证 —— 调用点不要在这里写"另一套"实现。
+   */
+  sync: () => T
+  /**
+   * 调用点报上来的**真实**规模（见 `layerScale`）。缺省时退回 `estimateScale(job)`，
+   * 那在抽样层上会低估 → 可能漏掉本该隔离的大任务。生产路径请显式传。
+   */
+  scale?: number
+}
+
+/** 派发结果。判别式信封 —— 不能直接返回 `T`，因为 4 个统计 op 的正常返回值本身就是 `{ok:false,message}`。 */
+export type GeoOpResult<T> = { ok: true; value: T } | { ok: false; message: string }
 
 /** 域工具注册函数共享的运行时面（见 createGeoToolRuntime）。 */
 export interface GeoToolRuntime {
@@ -278,6 +322,24 @@ export interface GeoToolRuntime {
    * 未注入（单测/裁剪部署）时返回 undefined，调用方退回原 Turf 路线。
    */
   attrFilterFullTable?: FullTableAttrFilter
+  runGeoJob?: <T>(job: GeoWorkerJob, timeoutMs: number, opts?: { signal?: AbortSignal }) => Promise<T>
+  /**
+   * 重计算的**唯一派发漏斗**：门控（该不该隔离）+ 转发 `exec.signal` + 超时预算 + 统一错误形态。
+   *
+   * 为什么收敛成一个方法而不是 14 个调用点各写：
+   * ① 这三件事天然同源，各写就是 14 次写错的机会；
+   * ② 门控与错误形态能被**一个**测试覆盖；
+   * ③ `runGeoJob` 的签名改动只需落在这一处。
+   *
+   * 调用点用法：
+   * ```ts
+   * const r = await rt.runGeoOp({ exec, job: {...}, budgetMs: workerBudget(GEO_TOOL_TIMEOUTS.op),
+   *                               sync: () => opBuffer(layer, distance, unit), scale: layerScale(layer) })
+   * if (!r.ok) return r                      // 已经是统一的中文 { ok:false, message }
+   * return pushResult('缓冲', r.value, layer.name)
+   * ```
+   */
+  runGeoOp: <T>(req: GeoOpRequest<T>) => Promise<GeoOpResult<T>>
   /** host 侧钩子（图层生命周期 + 底图要素导出请求转发）。 */
   hooks: LayerLifecycleHooks | undefined
   /** 展示方式切换：校验几何兼容性后原地改 mode/modeParams，不 bump rev。 */
@@ -338,10 +400,42 @@ export function createGeoToolRuntime(
     return pushResultTo(st, () => st.layers, opLabel, geojson, inputLabel, mode, modeParams, extra)
   }
 
+  /**
+   * 唯一派发漏斗。见 `GeoToolRuntime.runGeoOp` 的说明。
+   *
+   * 注意这里**不知道也不 import 任何 op** —— 主线程直算走调用点给的 `sync` 闭包。
+   * 若在这里 switch(kind) 就会退化成第二个 dispatch 表(worker 里已经有一个),两边迟早分叉。
+   */
+  const runGeoOp = async <T>(req: GeoOpRequest<T>): Promise<GeoOpResult<T>> => {
+    const job = req.job
+    const decision = shouldIsolate(job, req.scale)
+    // 没注入执行器(旧宿主/单测)时保持同步兼容 —— 与改动前的 `runGeoJob ? ... : opX(...)` 一致。
+    const isolate = decision.isolate && typeof deps?.runGeoJob === 'function'
+    if (!isolate) {
+      // ⚠️ 同步路径同样要 catch:原先 14 个调用点里有 7 个没包 try/catch，
+      // 于是同样的失败在不同工具表现为 isError / {ok:false} / 异常逃逸三种形态。
+      try {
+        return { ok: true, value: req.sync() }
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) }
+      }
+    }
+    try {
+      const value = await deps!.runGeoJob!<T>(job, req.budgetMs, req.exec.signal ? { signal: req.exec.signal } : {})
+      return { ok: true, value }
+    } catch (err) {
+      // 超时/取消/worker 异常都在这里收成统一形态。取消时**不会**走到 pushResult ——
+      // 调用点是 `if (!r.ok) return r`，所以不会留下"模型认为不存在的图层"。
+      return { ok: false, message: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
   return {
     sess,
     pushResult,
+    runGeoOp,
     ...(deps?.attrFilterFullTable ? { attrFilterFullTable: deps.attrFilterFullTable } : {}),
+    ...(deps?.runGeoJob ? { runGeoJob: deps.runGeoJob } : {}),
     hooks,
     applyMode,
     applyStyle,

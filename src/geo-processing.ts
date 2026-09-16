@@ -15,6 +15,7 @@
 import type { BBox, Feature, FeatureCollection, Geometry, MultiPolygon, Point, Polygon } from 'geojson'
 import { DECK_EFFECT_MODES, pickRenderer } from './render-policy.js'
 import type { ThematicSpec } from './thematic.js'
+import { MAX_REGULAR_GRID_CELLS } from './geo-limits.js'
 import { bbox as turfBbox } from '@turf/bbox'
 import { bboxPolygon as turfBboxPolygon } from '@turf/bbox-polygon'
 import { buffer as turfBuffer } from '@turf/buffer'
@@ -22,7 +23,7 @@ import { centroid as turfCentroid } from '@turf/centroid'
 import { convex as turfConvex } from '@turf/convex'
 import { difference as turfDifference } from '@turf/difference'
 import { flatten as turfFlatten } from '@turf/flatten'
-import { feature as makeFeature, featureCollection as fc, type Units } from '@turf/helpers'
+import { convertLength, feature as makeFeature, featureCollection as fc, type Units } from '@turf/helpers'
 import { intersect as turfIntersect } from '@turf/intersect'
 import { toMercator, toWgs84 } from '@turf/projection'
 import { simplify as turfSimplify } from '@turf/simplify'
@@ -50,8 +51,25 @@ export type DisplayMode = 'points' | 'plane' | 'hex' | 'arc' | 'trips' | 'wall' 
 /** deck.gl 出图的可选数值参数（radius=辐射半径米、height=围墙高度米、speed/trail=轨迹、width=线宽像素）。 */
 export type ModeParams = Record<string, number>
 
+/**
+ * 「只吃几何」的算子入参。
+ *
+ * 收窄成这个类型是一道**类型层面的护栏**,不是洁癖:worker 里构造的载荷只有 `{ geojson }`
+ * (层元数据不进 worker),若某个 op 悄悄读了 `layer.name` / `layer.bbox`,worker 里会拿到
+ * `undefined` 并**静默算错** —— 而收窄之后 tsc 会立刻报错。
+ *
+ * 换句话说:让"不该发生的事"编译不过,而不是靠人记得。`GisLayer` 结构上满足本接口,
+ * 所以主线程的调用点零改动。
+ *
+ * ⚠️ 只对**会进 worker 的算子**收窄。`opBBoxPolygon` 这类读 `layer.bbox` 的、以及永不进
+ * worker 的算子保持 `GisLayer` —— 收窄它们不加安全性,只会扩大改动面。
+ */
+export interface GeoInput {
+  geojson: FeatureCollection
+}
+
 /** 注册表里的一个图层（含全量几何）。source 区分数据来源，未来 PostGIS 结果也用 'postgis'。 */
-export interface GisLayer {
+export interface GisLayer extends GeoInput {
   id: string
   name: string
   geojson: FeatureCollection
@@ -126,6 +144,22 @@ export interface LayerSummary {
 }
 
 const EMPTY_FC: FeatureCollection = fc([])
+
+/**
+ * 【背景】Turf 的 polygon union 等拓扑计算是同步的，**无法被 AbortSignal 或工具 timeout 抢占**。
+ * 道路等线状要素经过缓冲后会形成大量、且高度相交的面；把它们一次性交给 union 会长期阻塞
+ * Node 事件循环，进而使停止请求与服务关闭都得不到处理 —— 这是当初加 worker 隔离的动机。
+ *
+ * 【这里曾经有什么】本节原先写着「故意采用保守的预检上限」，但那段预检**早已不存在**
+ * （全文件 grep 无任何上限常量或检查代码）。注释比代码活得久，会误导后来者以为这条路已被保护。
+ *
+ * 【上限现在在哪】分两处，别搞混：
+ * - **防崩的硬上限** → `geo-limits.ts`（如 `MAX_REGULAR_GRID_CELLS`、`MAX_GRID_CELLS`），
+ *   在算子内部与工具派发前两头检查。
+ * - **决定要不要隔离执行的性能门控** → `geo-job-policy.ts`。
+ * 上面这些算子本身**没有**规模预检 —— 它们靠 worker 隔离 + 时限兜底，而不是靠拒绝输入。
+ * 不能把 `timeoutMs` 当成同步 Turf 计算的取消机制：唯一真能停活的手段是 `worker.terminate()`。
+ */
 
 const GEOM_TYPES = new Set([
   'Point', 'MultiPoint', 'LineString', 'MultiLineString',
@@ -332,7 +366,7 @@ function unionFC(fcIn: FeatureCollection): Feature<Polygon | MultiPolygon> | nul
 // ---- 构造类操作 ----
 
 /** 缓冲区。unit 取 turf 支持的 units（miles/kilometers/meters/feet/yards/degrees）。 */
-export function opBuffer(layer: GisLayer, distance: number, unit: string): FeatureCollection {
+export function opBuffer(layer: GeoInput, distance: number, unit: string): FeatureCollection {
   const clean = cleanFeatureCollection(layer.geojson)
   if (clean.features.length === 0) return EMPTY_FC
   const r = turfBuffer(clean, distance, { units: unit as Units })
@@ -369,7 +403,7 @@ export function opBBoxPolygon(layer: GisLayer): FeatureCollection {
  * 溶解：按 field 分组后每组 union 为一个要素；不传 field 则全部合并为一个要素。
  * 手写实现（groupBy + union），不用 @turf/dissolve（仅面、慢、字段缺失抛错）。
  */
-export function opDissolve(layer: GisLayer, field: string | undefined): FeatureCollection {
+export function opDissolve(layer: GeoInput, field: string | undefined): FeatureCollection {
   const clean = cleanFeatureCollection(layer.geojson)
   if (clean.features.length === 0) return EMPTY_FC
   if (!field) {
@@ -393,7 +427,7 @@ export function opDissolve(layer: GisLayer, field: string | undefined): FeatureC
 }
 
 /** 简化（Douglas-Peucker）。tolerance 单位 = 坐标度数（WGS84），非米。 */
-export function opSimplify(layer: GisLayer, tolerance: number, highQuality: boolean): FeatureCollection {
+export function opSimplify(layer: GeoInput, tolerance: number, highQuality: boolean): FeatureCollection {
   const clean = cleanFeatureCollection(layer.geojson)
   if (clean.features.length === 0) return EMPTY_FC
   const r = turfSimplify(clean, { tolerance, highQuality })
@@ -413,7 +447,7 @@ export function opExplode(layer: GisLayer): FeatureCollection {
 // 第一个减其余、union=全部合并。所以先每侧 union 成单要素，再把 [ua, ub] 放进一个集合。
 
 /** 交集：保留两图层重叠部分。 */
-export function opIntersect(a: GisLayer, b: GisLayer): FeatureCollection {
+export function opIntersect(a: GeoInput, b: GeoInput): FeatureCollection {
   return overlayFC(a.geojson, b.geojson, (ua, ub) => {
     try {
       return turfIntersect(fc([ua, ub])) ?? null
@@ -424,12 +458,12 @@ export function opIntersect(a: GisLayer, b: GisLayer): FeatureCollection {
 }
 
 /** 裁剪：保留 layer 在 overlay 范围内的部分（属性取 layer）。 */
-export function opClip(layer: GisLayer, overlay: GisLayer): FeatureCollection {
+export function opClip(layer: GeoInput, overlay: GeoInput): FeatureCollection {
   return opIntersect(layer, overlay)
 }
 
 /** 差集：从 layer 减去 overlay 覆盖的区域。 */
-export function opDifference(layer: GisLayer, overlay: GisLayer): FeatureCollection {
+export function opDifference(layer: GeoInput, overlay: GeoInput): FeatureCollection {
   const ua = unionFC(layer.geojson)
   if (!ua) return EMPTY_FC
   const ub = unionFC(overlay.geojson)
@@ -443,7 +477,7 @@ export function opDifference(layer: GisLayer, overlay: GisLayer): FeatureCollect
 }
 
 /** 并集：两图层全部要素合并为一个（面）。 */
-export function opUnion(a: GisLayer, b: GisLayer): FeatureCollection {
+export function opUnion(a: GeoInput, b: GeoInput): FeatureCollection {
   const combined = fc([...a.geojson.features, ...b.geojson.features])
   const r = unionFC(combined)
   return r ? fc([r]) : EMPTY_FC
@@ -531,8 +565,8 @@ export type JoinRelation = 'contains' | 'within' | 'intersects'
  * （并复制首个匹配要素的 name 到 _joinName）。用 bbox 预过滤避免全量布尔计算。
  */
 export function opSpatialJoin(
-  target: GisLayer,
-  join: GisLayer,
+  target: GeoInput,
+  join: GeoInput,
   relation: JoinRelation,
 ): FeatureCollection {
   const joinFeatures = join.geojson.features
@@ -656,18 +690,63 @@ export function opReproject(layer: GisLayer, to: 'mercator' | 'wgs84'): FeatureC
 }
 
 /** 规则方格网（@turf/square-grid）。bbox 校验 + cellSize>0。 */
+/**
+ * 规则格网的**格数**——必须与 `squareGrid` 内部的算法逐字一致,否则上限就成了摆设。
+ *
+ * `squareGrid` 实为 `rectangleGrid`,`@turf/rectangle-grid` 里是:
+ * ```
+ * cellWidthDeg = convertLength(cellWidth, units, 'degrees')
+ * columns = Math.floor(|east - west| / cellWidthDeg)
+ * rows    = Math.floor(|north - south| / cellHeightDeg)
+ * ```
+ * 所以这里**复用 turf 自己的 `convertLength`** 而不是自己写单位换算 —— 自己写就会分叉
+ * (turf 的 factors 表、度数换算精度都可能不同),分叉了要么拦不住、要么误拦。
+ */
+export function regularGridCellCount(bbox: BBox, cellSize: number, unit: string): number {
+  const [w, s, e, n] = bbox
+  const cellDeg = convertLength(cellSize, unit as Units, 'degrees')
+  if (!(cellDeg > 0)) return Number.POSITIVE_INFINITY // 极小格距 → 视作无限格,交给上限拦
+  const columns = Math.floor(Math.abs(e - w) / cellDeg)
+  const rows = Math.floor(Math.abs(n - s) / cellDeg)
+  return columns * rows
+}
+
+/**
+ * 生成规则方格网。
+ *
+ * ⚠️ 本算子的规模**与图层无关** —— 由 bbox + cellSize 直接决定。`cellSize` 传 0.0001 覆盖全国
+ * 就是 10⁸ 个格子,turf 会在主线程直接 OOM,而 `timeoutMs` 对同步代码毫无作用。
+ * 所以这里有一道**防荒谬输入的硬上限**(不是性能门控):超了直接拒绝并告诉用户怎么改。
+ */
 export function opRegularGrid(bbox: BBox, cellSize: number, unit: string): FeatureCollection {
   const [w, s, e, n] = bbox
   if (![w, s, e, n].every((v) => Number.isFinite(v)) || w >= e || s >= n) {
     throw new Error('bbox 非法：需为 [west, south, east, north] 且 w<e、s<n')
   }
   if (!(cellSize > 0)) throw new Error('cellSize 必须为正数')
+  const cells = regularGridCellCount(bbox, cellSize, unit)
+  if (cells > MAX_REGULAR_GRID_CELLS) {
+    throw new Error(regularGridTooDenseMessage(cells, bbox, unit))
+  }
   const grid = squareGrid(bbox, cellSize, { units: unit as Units })
   return grid ? normalizeFC(grid) : EMPTY_FC
 }
 
+/** 格网过密时的中文提示（工具层与算子层共用，保证两处文案一致）。 */
+export function regularGridTooDenseMessage(cells: number, bbox: BBox, unit: string): string {
+  // 反推"刚好不超限"所需的格边长（面积比开方），给用户一个可直接照做的数。
+  const [w, s, e, n] = bbox
+  const areaDeg = Math.abs(e - w) * Math.abs(n - s)
+  const needDeg = Math.sqrt(areaDeg / MAX_REGULAR_GRID_CELLS)
+  const suggested = convertLength(needDeg, 'degrees', unit as Units)
+  // 建议值向上取一位有效小数，避免"照着填还是差一点"
+  const nice = suggested >= 1 ? Math.ceil(suggested * 10) / 10 : Math.ceil(suggested * 1000) / 1000
+  return `格网过密：当前会生成约 ${cells.toLocaleString('en-US')} 个格子，超过上限 `
+    + `${MAX_REGULAR_GRID_CELLS.toLocaleString('en-US')}。请把 cellSize 调大到 ${nice}（当前单位 ${unit}）以上，或缩小 bbox 范围。`
+}
+
 /** 泰森多边形（@turf/voronoi）。仅点，≥3 点；bbox 默认图层范围外扩 10%。 */
-export function opVoronoi(layer: GisLayer, bbox?: BBox): FeatureCollection {
+export function opVoronoi(layer: GeoInput, bbox?: BBox): FeatureCollection {
   const clean = cleanFeatureCollection(layer.geojson)
   const points = clean.features.filter((f) => f?.geometry?.type === 'Point')
   if (points.length < 3) throw new Error('泰森多边形至少需要 3 个点要素')
@@ -717,9 +796,9 @@ export function opAttributeJoin(
 
 /** 按位置筛选：overlay（图层，任一满足即保留）或 bbox（构造 bbox 面）二选一。 */
 export function opSelectByLocation(
-  layer: GisLayer,
+  layer: GeoInput,
   relation: JoinRelation,
-  overlay?: GisLayer,
+  overlay?: GeoInput,
   bbox?: BBox,
 ): FeatureCollection {
   if (Boolean(overlay) === Boolean(bbox)) throw new Error('overlay 与 bbox 必须且只能提供一个')
