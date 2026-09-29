@@ -1,3 +1,4 @@
+import { acquireLayer, type LayerLease } from '../layer-access.js'
 /**
  * DuckDB 工具注册：webgis_spatial_filter（全表空间筛选）（自 src/duckdb-tools.ts 拆分）。
  */
@@ -38,28 +39,10 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
 
   ctx.tools.register(defineTool({
     name: 'webgis_spatial_filter',
-    description:
-      '在持有 DuckDB 内存表的图层上做「全表空间筛选」→ 新图层或统计（DuckDB 管大表谓词，Turf 只管筛小后的探索）。'
-      + '⚠ 与本工具易混的：**已筛小的普通图层**按位置筛选用 webgis_select_by_location（Turf，在显示子集上算）；'
-      + '按属性等值筛选大图层用 webgis_filter_layer（where）；**几何列图层上 webgis_filter_layer 不支持 polygon/radius 围栏**（那边会报「暂不支持」），围栏筛选一律走本工具。'
-      + '判断图层大小看 webgis_list_layers 的 materialized/totalCount：materialized=false 就是「地图上只是抽样」，别用 Turf 类工具下全量结论。'
-      + '只对含内存表（duckTable）的图层可用，不限来源：既支持 webgis_load_csv 的经纬度点列（duckCoords），'
-      + '也支持几何列图层（duckGeom，format geometry/wkb/wkt，sourceCrs 非 4326 自动转 4326）。'
-      + 'mode：bbox=经纬度范围（仅点状源）；dwithin=center:{lon,lat}+distanceMeters 半径筛选'
-      + '（haversine 球面米，与 filter_layer 半径一致，仅点状源）；'
-      + 'within_polygon=polygon(GeoJSON 面) 或 polygonLayer(面图层 id) 作围栏（ST_Intersects，点落内即 true，线/面源也可用）；'
-      + 'intersects_layer=otherLayerId 与另一图层几何相交（对方是 duck 内存表直接 join；'
-      + '对方仅纯 GeoJSON 且要素 ≤20000 时临时灌表后 join，用完即删；过大/无几何会明确报错）。'
-      + 'bbox/dwithin 要求可点化源（经纬度列，或几何族全为 point 的几何列）；线/面/混合几何源请用 within_polygon/intersects_layer'
-      + '或先筛出子集再用 Turf。距离语义=haversine 球面米；相交/围栏按 4326 经纬度平面计算（几何源已归 4326）。'
-      + '大表空间意图（全表多少个/落在哪/距某点多近/与另一层相交）优先用本工具，不要在抽样子集上跑 Turf 下结论。'
-      + 'where 传可选等于筛选（JSON 对象，复用 filter_layer 语义）。output=count_only 只返回统计不建图层；'
-      + '缺省 output=layer 建新图层并上图（结果仍保留 duckTable 可继续链式筛选）。'
-      + '结果永远带 scope 说明：count_only=full_table（全表算，未上图）；layer 全量上图=filtered；'
-      + '命中超过上图阈值只抽样显示=sample_display（会如实说明，不会把抽样说成全量）。'
-      + '禁止对百万级几何默认全量 buffer 并宣称已全部上图。',
+    description: '对图层完整数据进行空间筛选，自动识别坐标列、几何列或普通图层。bbox/dwithin 支持点；within_polygon 为与面围栏相交（含边界，点线面均可）；intersects_layer 与另一图层任意要素相交。'
+      + 'dwithin 使用 haversine 球面米；相交按 WGS84 平面几何。where 可叠加等值条件。output=count_only 仅统计，默认 layer 生成可继续分析的新图层。返回 scope 和真实命中/显示行数；limit 只限制显示。',
     parameters: {
-      layer: { type: 'string', required: true, description: '目标 DuckDB 图层 id（需含内存表；webgis_list_layers 查看）' },
+      layer: { type: 'string', required: true, description: '目标图层 id' },
       mode: {
         type: 'string', required: true, enum: ['bbox', 'dwithin', 'within_polygon', 'intersects_layer'],
         description: '空间筛选模式',
@@ -102,22 +85,17 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
-      const layer = resolve(args.layer)
+      let layer = resolve(args.layer)
       if (typeof layer === 'string') return { ok: false, message: layer }
-      const table = layer.duckTable
-      if (!table) {
-        return { ok: false, message: `图层 ${layer.id} 不是 DuckDB 大文件图层（无内存表；请先用 webgis_load_csv 加载，或对小层用 Turf 工具）` }
-      }
-      const shape = duckGeomSourceOf(layer)
-      if (!shape.coords && !shape.geom) {
-        return { ok: false, message: `图层 ${layer.id} 缺 DuckDB 经纬度/几何列信息` }
-      }
-      const mode = typeof args.mode === 'string' ? args.mode : ''
-      if (!['bbox', 'dwithin', 'within_polygon', 'intersects_layer'].includes(mode)) {
-        return { ok: false, message: `mode 只支持 bbox/dwithin/within_polygon/intersects_layer，收到 ${mode}` }
-      }
-      const isCountOnly = args.output === 'count_only'
+      let lease: LayerLease | undefined
+      let resultTable: string | undefined
       try {
+        lease = await acquireLayer(engine, layer)
+        layer = lease.layer
+        const table = lease.layer.duckTable
+        const shape = duckGeomSourceOf(layer)
+        const mode = args.mode
+        const isCountOnly = args.output === 'count_only'
         const eq = eqClauseText(args as Record<string, unknown>)
 
         /** 构造 intersects 结果：返回 count 与物化函数。rid 临时表生命周期内管理。 */
@@ -129,77 +107,66 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
           if (!otherId) throw new Error('intersects_layer 模式需提供 otherLayerId')
           const other = resolve(otherId)
           if (typeof other === 'string') throw new Error(other)
-          let otherTable: string
-          let otherShape: DuckGeomSource
-          let tempOther: string | null = null
-          if (other.duckTable) {
-            otherTable = other.duckTable
-            otherShape = duckGeomSourceOf(other)
-            if (!otherShape.coords && !otherShape.geom) {
-              throw new Error(`对方图层 ${other.id} 有内存表但缺经纬度/几何列信息，无法相交`)
-            }
-          } else {
-            // 纯 GeoJSON 图层：要素数在限额内才临时灌表（用完 DROP）。
-            if (other.featureCount === 0) throw new Error(`对方图层 ${other.id} 没有要素可相交`)
-            if (other.featureCount > SPATIAL_TEMP_MAX) {
-              throw new Error(`对方图层 ${other.id} 是纯 GeoJSON（非 duck 内存表）且要素 ${other.featureCount} > ${SPATIAL_TEMP_MAX}：`
-                + '过大无法临时灌表。请先对该图层用 webgis_spatial_filter 筛出子集，或用 webgis_load_csv 灌成 duck 内存表后再相交。')
-            }
-            tempOther = engine.nextTableName()
-            const gj = await engine.createTableFromGeoJson(tempOther, other.geojson)
-            if (!gj.geomColumn) {
-              await engine.dropTable(tempOther).catch(() => {})
-              throw new Error(`对方图层 ${other.id} 的 GeoJSON 没有可识别几何列，无法相交`)
-            }
-            otherTable = tempOther
-            otherShape = { geom: { column: gj.geomColumn, format: 'geometry', sourceCrs: null } }
-          }
-          // 两侧子查询：rid + 几何表达式 + 数值化 bbox（避免触发 DuckDB SPATIAL_JOIN 崩溃/不稳）。
-          const bboxSide = (tbl: string, src: DuckGeomSource, whereText: string): string => {
-            const g = rowGeomExprOf(src)
-            let xs: string; let xe: string; let ys: string; let ye: string
-            if (src.coords) {
-              const c = src.coords
-              xs = `${quoteIdent(c.lon)}`; xe = `${quoteIdent(c.lon)}`
-              ys = `${quoteIdent(c.lat)}`; ye = `${quoteIdent(c.lat)}`
-            } else {
-              xs = `ST_XMin(${g})`; xe = `ST_XMax(${g})`
-              ys = `ST_YMin(${g})`; ye = `ST_YMax(${g})`
-            }
-            return `(SELECT ${quoteIdent(DUCK_RID)} AS ${quoteIdent('__rid')}, ${g} AS __g, `
-              + `${xs} AS __x1, ${xe} AS __x2, ${ys} AS __y1, ${ye} AS __y2 FROM ${tbl} ${whereText})`
-          }
-          const srcSub = bboxSide(table, shape, combineWhereText([eq]))
-          const othSub = bboxSide(otherTable, otherShape, '')
-          const cond = '__s.__x1 <= __o.__x2 AND __s.__x2 >= __o.__x1 AND __s.__y1 <= __o.__y2 AND __s.__y2 >= __o.__y1 '
-            + 'AND ST_Intersects(__s.__g, __o.__g)'
-          const ridTable = engine.nextTableName()
-          const dropRid = async (): Promise<void> => {
-            await engine.dropTable(ridTable).catch(() => {})
-          }
+          // ⚠ 空图层必须先拦：acquireLayer 从 0 要素的 geojson 建表只会得到一列 geom，
+          // 既探不出经纬度列也探不出几何列 → join 恒为 0 行 → 工具会返回一个**自信的**
+          // `count:0 / scope:full_table`，模型据此向用户断言「两个图层没有任何相交要素」。
+          // 那是"看着正常的错答案"，本项目最贵的一类 bug。
+          if (other.featureCount === 0) throw new Error(`对方图层 ${other.id} 没有要素可相交`)
+          if (!other.duckTable && other.featureCount > SPATIAL_TEMP_MAX) throw new Error(`对方图层 ${other.id} 要素 ${other.featureCount} > ${SPATIAL_TEMP_MAX}，过大无法临时灌表`)
+          const otherLease = await acquireLayer(engine, other)
+          const otherTable = otherLease.layer.duckTable
+          const otherShape = duckGeomSourceOf(otherLease.layer)
+          const releaseOther = otherLease.release
           try {
-            await engine.exec(`CREATE TABLE ${ridTable} AS SELECT DISTINCT __s.__rid AS rid FROM ${srcSub} __s JOIN ${othSub} __o ON ${cond}`)
-            // ridTable 已物化，对方临时表不再需要 → 立即 DROP（防泄漏）。
-            if (tempOther) {
-              await engine.dropTable(tempOther).catch(() => {})
-              tempOther = null
+            // 同上：几何源两边都取不到时不能继续（会拼出无意义的 ST_* 表达式）。
+            if (!otherShape.coords && !otherShape.geom) {
+              throw new Error(`对方图层 ${other.id} 没有可识别的几何列或经纬度列，无法相交`)
             }
-            const cnt = await engine.run(`SELECT count(*) AS c FROM ${ridTable}`)
-            const resultCount = Number(cnt[0]?.c ?? 0)
-            const srcCnt = await engine.run(`SELECT count(*) AS c FROM ${table}`)
-            const sourceCount = Number(srcCnt[0]?.c ?? 0)
-            const mkTable = async (): Promise<string> => {
-              const resTable = engine.nextTableName()
-              await engine.createFilterTable(resTable, table, `WHERE ${quoteIdent(DUCK_RID)} IN (SELECT rid FROM ${ridTable})`)
+            // 两侧子查询：rid + 几何表达式 + 数值化 bbox（避免触发 DuckDB SPATIAL_JOIN 崩溃/不稳）。
+            const bboxSide = (tbl: string, src: DuckGeomSource, whereText: string): string => {
+              const g = rowGeomExprOf(src)
+              let xs: string; let xe: string; let ys: string; let ye: string
+              if (src.coords) {
+                const c = src.coords
+                xs = `${quoteIdent(c.lon)}`; xe = `${quoteIdent(c.lon)}`
+                ys = `${quoteIdent(c.lat)}`; ye = `${quoteIdent(c.lat)}`
+              } else {
+                xs = `ST_XMin(${g})`; xe = `ST_XMax(${g})`
+                ys = `ST_YMin(${g})`; ye = `ST_YMax(${g})`
+              }
+              return `(SELECT ${quoteIdent(DUCK_RID)} AS ${quoteIdent('__rid')}, ${g} AS __g, `
+                + `${xs} AS __x1, ${xe} AS __x2, ${ys} AS __y1, ${ye} AS __y2 FROM ${tbl} ${whereText})`
+            }
+            const srcSub = bboxSide(table, shape, combineWhereText([eq]))
+            const othSub = bboxSide(otherTable, otherShape, '')
+            const cond = '__s.__x1 <= __o.__x2 AND __s.__x2 >= __o.__x1 AND __s.__y1 <= __o.__y2 AND __s.__y2 >= __o.__y1 '
+              + 'AND ST_Intersects(__s.__g, __o.__g)'
+            const ridTable = engine.nextTableName()
+            const dropRid = async (): Promise<void> => {
+              await engine.dropTable(ridTable).catch(() => {})
+            }
+            try {
+              await engine.exec(`CREATE TABLE ${ridTable} AS SELECT DISTINCT __s.__rid AS rid FROM ${srcSub} __s JOIN ${othSub} __o ON ${cond}`)
+              const cnt = await engine.run(`SELECT count(*) AS c FROM ${ridTable}`)
+              const resultCount = Number(cnt[0]?.c ?? 0)
+              const srcCnt = await engine.run(`SELECT count(*) AS c FROM ${table}`)
+              const sourceCount = Number(srcCnt[0]?.c ?? 0)
+              const mkTable = async (): Promise<string> => {
+                const resTable = engine.nextTableName()
+                try {
+                  await engine.createFilterTable(resTable, table, `WHERE ${quoteIdent(DUCK_RID)} IN (SELECT rid FROM ${ridTable})`)
+                  return resTable
+                } catch (err) {
+                  await engine.dropTable(resTable).catch(() => {})
+                  throw err
+                } finally { await dropRid() }
+              }
+              return { sourceCount, resultCount, mkTable, dropRid }
+            } catch (err) {
               await dropRid()
-              return resTable
+              throw err
             }
-            return { sourceCount, resultCount, mkTable, dropRid }
-          } catch (err) {
-            await dropRid()
-            if (tempOther) await engine.dropTable(tempOther).catch(() => {})
-            throw err
-          }
+          } finally { await releaseOther().catch(() => {}) }
         }
 
         let meta:
@@ -271,9 +238,11 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
         // 物化结果表（链式筛选用）
         const resTable = meta.kind === 'intersects' ? await meta.mkTable() : await (async () => {
           const t = engine.nextTableName()
+          resultTable = t
           await engine.createFilterTable(t, table, meta.whereText)
           return t
         })()
+        resultTable = resTable
         const small = resultCount <= engine.threshold
         const limitArg = finiteInt(args.limit)
         const cap = small
@@ -299,7 +268,8 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
           fc = rowsToGeoJSON(rows, coords.lon, coords.lat)
         }
         displayedCount = fc.features.length
-        const scope = small ? 'filtered' : 'sample_display'
+        const fullyDisplayed = displayedCount === resultCount
+        const scope = fullyDisplayed ? 'filtered' : 'sample_display'
         const clustered = !!(shape.coords && !small && resultCount <= DECK_FROM)
         const push = await pushResult(`空间筛选 - ${layer.name}`, fc, {
           cluster: clustered,
@@ -308,7 +278,8 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
           ...(shape.geom ? { duckGeom: { column: shape.geom.column, format: shape.geom.format, sourceCrs: shape.geom.sourceCrs } } : {}),
           totalCount: resultCount,
         })
-        const note = small
+        resultTable = undefined
+        const note = fullyDisplayed
           ? `${noteBase}，命中 ${resultCount} 行并全量上图（scope=filtered）；结果表 ${resTable} 已建，可继续筛选。`
           : `${noteBase}，命中 ${resultCount} 行，抽样上图 ${displayedCount} 行（scope=sample_display，显示为抽样非全量）；结果表 ${resTable} 已建，可继续筛选。`
         return {
@@ -320,6 +291,9 @@ export function registerSpatialFilterTool(ctx: Context, deps: DuckToolDeps): voi
         }
       } catch (err) {
         return { ok: false, message: `空间筛选失败: ${friendlyDuckError(err)}` }
+      } finally {
+        if (resultTable) await engine.dropTable(resultTable).catch(() => {})
+        await lease?.release()
       }
     },
   }))

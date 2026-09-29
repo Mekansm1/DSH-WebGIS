@@ -81,7 +81,7 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       unit: { type: 'string', enum: ['miles', 'kilometers', 'meters', 'feet', 'yards', 'degrees'], description: '格边长单位，默认 kilometers' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const { pushResult } = sess(exec)
@@ -119,7 +119,7 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       bbox: { type: 'json', description: '计算范围 [west, south, east, north]（可选）' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
-    timeoutMs: 30000,
+    timeoutMs: GEO_TOOL_TIMEOUTS.op,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
@@ -178,11 +178,7 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_select_by_location',
-    description: COMMON + '【按位置筛选·普通图层】保留与 overlay 图层（任一要素满足）或 bbox 满足空间关系的要素。relation：contains（含）/within（在内）/intersects（相交）。overlay 与 bbox 二选一。'
-      + '⚠ 适用范围：**已全量物化的图层**（webgis_list_layers 里 materialized=true）；materialized=false 的大图层在显示抽样上算会失真，'
-      + '本工具会直接拒绝——要按全表筛围栏/半径请用 webgis_spatial_filter。'
-      + '按**属性值**筛选请用 webgis_select_by_value（本工具只管空间关系）。'
-      + ISOLATED_NOTE,
+    description: COMMON + '按空间关系保留要素并生成新图层：contains/within/intersects。overlay 与 bbox 二选一，overlay 任一要素满足即保留。任一侧为抽样层时自动使用完整数据。' + ISOLATED_NOTE,
     parameters: {
       layer: LAYER_PARAM,
       relation: { type: 'string', enum: ['contains', 'within', 'intersects'], description: '空间关系（默认 intersects）' },
@@ -198,8 +194,6 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
       const ferr = requireFeatures(layer)
       if (ferr) return Promise.resolve({ ok: false, message: ferr })
-      const merr = requireMaterialized(layer, '位置筛选')
-      if (merr) return Promise.resolve({ ok: false, message: merr })
       const relation = (args.relation === 'contains' || args.relation === 'within' ? args.relation : 'intersects') as JoinRelation
       const hasOverlay = typeof args.overlay === 'string' && args.overlay !== ''
       const bbox = Array.isArray(args.bbox) && args.bbox.length === 4 ? args.bbox as unknown as BBox : undefined
@@ -207,6 +201,13 @@ export function registerVectorTools(ctx: Context, rt: GeoToolRuntime): void {
       const overlay = hasOverlay ? resolve(args.overlay) : undefined
       if (hasOverlay && typeof overlay === 'string') return Promise.resolve({ ok: false, message: overlay })
       const ov = overlay && typeof overlay !== 'string' ? overlay : undefined
+      if (layer.materialized === false || ov?.materialized === false) {
+        if (!rt.filterFullLocation) return { ok: false, message: '完整数据位置筛选不可用，不能在抽样上计算；请重新加载' }
+        const full = await rt.filterFullLocation(layer, relation, ov, bbox ? [...bbox] : undefined)
+        if (!full.ok) return full
+        const push = pushResult('位置筛选', full.geojson, layer.name, undefined, undefined, full.extra)
+        return { ...push, message: `${push.message}（${full.message}）` }
+      }
       const r = await runGeoOp<ReturnType<typeof opSelectByLocation>>({
         exec,
         job: {

@@ -8,6 +8,7 @@ import type { ExportPrefill } from './ExportMapDialog.js'
 import type { WebgisT } from './webgis-i18n.js'
 import { ensure } from './chunk-loader.js'
 import { sessionUrl } from './sessionUrl.js'
+import { postJsonReportingFailure } from './post-json.js'
 import { BASE_MAPS, baseMapAction, CARTO_LIGHT_TILES, type BaseMapDef } from '../basemaps.js'
 import type { OverlayService } from '../webgis-services.js'
 import { BasemapSwitcher } from './BasemapSwitcher.js'
@@ -142,15 +143,9 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
     } catch (err) {
       payload = { seq: req.seq, ok: false, message: `底图要素提取失败：${err instanceof Error ? err.message : String(err)}` }
     }
-    try {
-      await fetch(sessionUrl(sessionRef.current, '/webgis/basemap-extract'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-    } catch (err) {
-      console.warn('[MapView] 底图要素回传失败', err)
-    }
+    // 回传失败原先只 console.warn：host 侧同样只剩「超时」。改为把原因也送回去
+    // （小请求带 seq，见 post-json.ts），等待中的 webgis_export_basemap 立刻拿到真因。
+    await postJsonReportingFailure('/webgis/basemap-extract', sessionRef.current, payload, { seq: req.seq })
   }
 
   const lastNavigateId = useRef(0)
@@ -659,6 +654,17 @@ export function MapView({ sessionId, t }: { sessionId?: string; t: WebgisT }) {
       await layerSync.syncLayers(map, summaries, force)
     }
     const rebuildAfterStyleLoad = (map: MapLibreMap): Promise<void> => layerSync.rebuildAfterStyleLoad(map)
+    // 引导自述：轮询循环起来了、以及它**实际请求的 URL**。
+    // 若这行出现而 host 侧仍报 lastClientPollAt=null，说明请求没到达 /webgis/state 路由
+    // （会话 id / 端口 / 路径不匹配），而不是客户端没挂载——两者处置完全不同。
+    console.info('[webgis] MapView polling:', sessionUrl(sessionRef.current, '/webgis/state'))
+    // 会话 id 缺失 = 致命且**静默**：客户端会落到 host 的 anon 桶，而工具用 exec.agent.id 那个桶，
+    // 两个桶互不相通 → 所有「等客户端回传」的工具（get_pick / export_basemap / export_map）全部超时，
+    // 且 host 侧只看到"客户端从未拉取过状态"，完全指不到真正的原因。所以这里必须响亮地报出来。
+    if (!sessionRef.current) {
+      console.error('[webgis] 会话 id 缺失：客户端与工具将落在不同的状态桶，所有"等客户端回传"的工具都会超时。'
+        + '根因在 GisSurface 拿不到当前会话 id（见该文件里 useSessions 的窄选择器注释）。')
+    }
     const poll = async (): Promise<void> => {
       if (inFlight) return
       inFlight = true

@@ -37,7 +37,8 @@ export function buildEqualityClause(args: Record<string, unknown>): string {
   const eq = args.where ?? args.filter
   if (eq && typeof eq === 'object' && !Array.isArray(eq)) {
     for (const [k, v] of Object.entries(eq as Record<string, unknown>)) {
-      if (v === undefined || v === null) continue
+      if (v === undefined) continue
+      if (v === null) { parts.push(`${escIdent(k)} IS NULL`); continue }
       parts.push(`${escIdent(k)} = ${inlineValue(v)}`)
     }
   }

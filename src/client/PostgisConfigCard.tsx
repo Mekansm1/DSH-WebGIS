@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WebgisT } from './webgis-i18n.js'
 import styles from './webgis.module.css'
 
@@ -215,7 +215,7 @@ export function PostgisConfigSection({ t }: { t: WebgisT }) {
           <span className={styles.settingsDesc}>{t('postgis.cardDesc')}</span>
         </span>
         {dirty && <span className={styles.settingsPending}>{t('settings.unsaved')}</span>}
-        <IconChevronDownOutline14
+        <IconChevronDownOutlineMedium
           className={open ? `${styles.settingsChevron} ${styles.settingsChevronOpen}` : styles.settingsChevron}
         />
       </button>

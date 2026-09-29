@@ -42,11 +42,37 @@ export type GisMapCompProps = { sessionId?: string; t: WebgisT }
  * 根元素填满 overlayLayer（position:absolute; inset:0）。
  * `t` 由 DSH 渲染器按声明 `locale:'webgis'` 注入（语言切换给新引用 → 自动重渲染）。
  */
-export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale<'webgis'>) {
+export function GisSurface(props: GlobalStandardProps & PropsLocale<'webgis'>) {
+  const { useSessions, t } = props
+
+  /**
+   * 当前会话 id。**0.1.7 的取法与 0.1.2 不同，这里踩过一个大坑**：
+   *
+   * `SessionListState.current` **在 0.1.7 已被删除**（0.1.2 还有）。继续读 `s.current` 会恒为
+   * `undefined`，于是客户端轮询 `?session=`（空）→ 落到 host 的 `anon` 桶，而工具用
+   * `exec.agent?.id` 写**自己那个会话桶** → 两桶互不相通 → 所有"等客户端回传"的工具
+   * （get_pick / export_basemap / export_map）一律超时；而地图照常渲染，肉眼看着"一切正常"。
+   *
+   * 0.1.7 的官方算法是「被主视图保留的那个会话」—— DSH 自己在 `dsh-client-ui-session` 里就是这么
+   * 算当前会话的（`retainedBy.mainView > 0`）。`mainView` 这个引用源由 `dsh-client-ui-session`
+   * 增补到 `SessionReferenceSourceMap`，本包 client 已 type-only 引入它，声明合并生效。
+   *
+   * ⚠️ 选择器**必须返回基本类型**（这里是 `string | null`）：返回整快照或对象时引用不随状态更新
+   * 而变，React 判定"没变化"→ 永不重渲染 → 永远读着初始值。此坑已实测踩过。
+   */
+  const current = useSessions(
+    (s) => Object.values(s.byId).find((r) => (r.retainedBy.mainView ?? 0) > 0)?.id ?? null,
+  ) ?? undefined
+  // 同上取该会话的 blank（"新对话"判定）；无会话时视为"新对话"。
+  const blank = useSessions((s) => {
+    const hit = Object.values(s.byId).find((r) => (r.retainedBy.mainView ?? 0) > 0)
+    return hit === undefined ? true : hit.blank
+  })
+  // 诊断用窄选择器（同样选基本类型）：会话列表的到达状态与规模。仅在值变化时打进日志。
+  const phase = useSessions((s) => s.phase)
+  const idsLen = useSessions((s) => s.ids.length)
+  // 仅用于「离开空白会话时清模式」那个 effect；判断取值请一律走上面的窄选择器。
   const sessions = useSessions((s) => s)
-  const current = sessions.current
-  // 尚无会话（hero）或当前会话为空白 → 视为"新对话"状态
-  const blank = current === undefined ? true : !!sessions.byId[current]?.blank
   const mode = useWebgisMode(current)
   const prevCurrent = useRef<typeof current>(current)
   const gisRef = useRef<HTMLDivElement>(null)
@@ -278,6 +304,18 @@ export function GisSurface({ useSessions, t }: GlobalStandardProps & PropsLocale
   // 放在本组件自己的渲染里（shell.overlay 座已确认始终可见：地图/选择器都在这渲染），
   // 不依赖会话头部 actions 槽——该槽在活跃布局下不可靠（用户实测切换按钮消失）。
   const showToggle = current !== undefined && !(blank && mode === null)
+
+  // 引导自述：GisSurface 的门禁状态。MapView（= /webgis/state 轮询的所在）只在
+  // mode==='gis' 时挂载；mode!=='gis' 或插件停用都会让客户端从不轮询，表现为工具侧一律超时。
+  // **仅在取值变化时打印**：轮询期这些值随会话切换而变，每帧打会刷屏；变化时打足以定位问题
+  // （会话 id 缺失这个坑就是靠这行日记出来的 —— 当时它每帧都打 `current=undefined`）。
+  const surfaceKey = `${String(mode)}|${String(pluginEnabled)}|${String(blank)}|${String(current)}|${String(phase)}|${idsLen}`
+  const lastSurfaceKey = useRef('')
+  if (lastSurfaceKey.current !== surfaceKey) {
+    lastSurfaceKey.current = surfaceKey
+    console.info(`[webgis] surface: mode=${String(mode)} enabled=${pluginEnabled} blank=${blank} current=${String(current)}`
+      + ` | 诊断: phase=${String(phase)} ids=${idsLen} url=${location.pathname}${location.search}`)
+  }
 
   // 插件关闭：整个 surface 渲染为空（地图/模式选择器/切换按钮都不出现），但组件保持挂载以继续轮询启停状态。
   if (pluginEnabled === false) return null

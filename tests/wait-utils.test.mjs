@@ -89,3 +89,36 @@ test('awaitBasemapExtraction: seq 不匹配不算本次结果；超时文案给�
   assert.match(r.message, /矢量底图/)
   assert.equal(st.basemapRequest, null)
 })
+
+// ---- 超时文案的成因诊断（clientLiveness）----
+// 这三种成因的处置完全不同，混成一句"超时"会让人无从下手 —— 0.1.7 会话 id 取不到那次
+// 就是卡在这里：客户端明明在轮询，只是落在了 anon 桶，而 host 只报"从未拉取过地图状态"。
+
+test('超时成因：本会话从未被轮询，且 anon 桶也无心跳 → 报"从未拉取过"', async () => {
+  const st = stateStub({ exportRequest: { seq: 7, params: {} }, lastClientPollAt: null })
+  const r = await awaitExportCompletion(st, 7, 200)
+  assert.equal(r.ok, false)
+  assert.match(r.message, /从未拉取过地图状态/)
+})
+
+test('超时成因：anon 桶有心跳（客户端已连上但没关联到本会话）→ 报真因，不报"从未拉取过"', async () => {
+  const st = stateStub({ exportRequest: { seq: 7, params: {} }, lastClientPollAt: null })
+  const r = await awaitExportCompletion(st, 7, 200, Date.now())
+  assert.equal(r.ok, false)
+  assert.match(r.message, /未关联到本会话/)
+  assert.doesNotMatch(r.message, /从未拉取过/)
+})
+
+test('超时成因：anon 心跳已过期（>5s）→ 不当作"已连接"，仍报"从未拉取过"', async () => {
+  const st = stateStub({ exportRequest: { seq: 7, params: {} }, lastClientPollAt: null })
+  const r = await awaitExportCompletion(st, 7, 200, Date.now() - 60_000)
+  assert.equal(r.ok, false)
+  assert.match(r.message, /从未拉取过地图状态/)
+})
+
+test('超时成因：本会话仍在被正常轮询 → 指向客户端自己（去看控制台）', async () => {
+  const st = stateStub({ exportRequest: { seq: 7, params: {} }, lastClientPollAt: Date.now() })
+  const r = await awaitExportCompletion(st, 7, 200)
+  assert.equal(r.ok, false)
+  assert.match(r.message, /仍在正常轮询/)
+})

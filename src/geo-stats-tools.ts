@@ -212,7 +212,7 @@ export function registerStatsTools(ctx: Context, rt: GeoToolRuntime): void {
         : layers()
       if (typeof targets === 'string') return Promise.resolve({ ok: false, message: targets })
       if (targets.length === 0) {
-        return Promise.resolve({ ok: false, stat: 'moran_inspect', value: { layers: [] }, message: '当前会话还没有任何图层：请先加载数据（webgis_load_dataset / webgis_load_csv / 数据库查询上图）再谈空间自相关分析。' })
+        return Promise.resolve({ ok: false, stat: 'moran_inspect', value: { layers: [] }, message: '当前会话还没有任何图层：请先加载数据（webgis_load_dataset / 数据库查询上图）再谈空间自相关分析。' })
       }
 
       const report: Array<Record<string, unknown>> = []

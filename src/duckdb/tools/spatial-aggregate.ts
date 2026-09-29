@@ -1,3 +1,4 @@
+import { acquireLayer, type LayerLease } from '../layer-access.js'
 /**
  * DuckDB 工具注册：webgis_spatial_aggregate（全表空间聚合）（自 src/duckdb-tools.ts 拆分）。
  */
@@ -36,17 +37,10 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
 
   ctx.tools.register(defineTool({
     name: 'webgis_spatial_aggregate',
-    description:
-      '在持有 DuckDB 内存表的图层上做全表聚合（DuckDB 管聚合，结果小，不喂 Turf 重算）。'
-      + 'kind=grid：按近似方形网格统计点密度/数值指标 → 小网格多边形图层上图（只对点状源：经纬度列或点几何列）。'
-      + '网格按参考纬度 lat0 把米制 cellSizeMeters 换算成经纬度增量（dLon=cell/(111320*cos(lat0))、dLat=cell/110540），'
-      + '是米制近似（cell 尺寸随纬度会有偏差，note 会说明）；origin 西界取图层范围西边界。默认每格 count，'
-      + 'metrics 可加 countDistinct/sum/avg（带 field）。maxCells（默认 2000）限制输出格数（取最密的前 N 格）。'
-      + 'kind=attribute：按 groupBy 列分组聚合 → 直接返回 rows（不建图层），默认 count、可加 metrics。'
-      + 'where 传可选等于筛选（先过滤再聚合）。源过大想先收敛时可先用 webgis_spatial_filter 筛出子集再聚合；'
-      + '本工具直接在 duck 表上聚合，结果很小。grid 适用于全表密度/热力概览，不做逐点精确制图。',
+    description: '对图层完整数据聚合，自动识别普通图层与全表来源。kind=attribute 按 groupBy 分组返回指标；kind=grid 对点生成密度网格图层。'
+      + '默认 count，metrics 支持去重计数/sum/avg，where 叠加等值条件。grid 用 lat0 将米近似换为经纬度，maxCells 取最密的前 N 格，返回说明截断与计算口径。attribute 最多返回 2000 组。',
     parameters: {
-      layer: { type: 'string', required: true, description: '目标 DuckDB 图层 id（需含内存表）' },
+      layer: { type: 'string', required: true, description: '目标图层 id' },
       kind: { type: 'string', required: true, enum: ['grid', 'attribute'], description: 'grid=规则网格聚合；attribute=按属性列分组聚合' },
       groupBy: { type: 'string', description: 'attribute 模式的分组列名' },
       metrics: {
@@ -68,6 +62,8 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
           scope: { type: 'string' },
           sourceCount: { type: 'integer' },
           resultCount: { type: 'integer' },
+          totalGroups: { type: 'integer' },
+          truncated: { type: 'boolean' },
           displayedCount: { type: 'integer' },
           note: { type: 'string' },
           rows: { type: 'json' },
@@ -83,19 +79,15 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
-      const layer = resolve(args.layer)
+      let layer = resolve(args.layer)
       if (typeof layer === 'string') return { ok: false, message: layer }
-      const table = layer.duckTable
-      if (!table) {
-        return { ok: false, message: `图层 ${layer.id} 不是 DuckDB 大文件图层（无内存表）` }
-      }
-      const shape = duckGeomSourceOf(layer)
-      if (!shape.coords && !shape.geom) {
-        return { ok: false, message: `图层 ${layer.id} 缺 DuckDB 经纬度/几何列信息` }
-      }
-      const kind = args.kind === 'attribute' ? 'attribute' : args.kind === 'grid' ? 'grid' : ''
-      if (!kind) return { ok: false, message: 'kind 只支持 grid / attribute' }
+      let lease: LayerLease | undefined
       try {
+        lease = await acquireLayer(engine, layer)
+        layer = lease.layer
+        const table = lease.layer.duckTable
+        const shape = duckGeomSourceOf(layer)
+        const kind = args.kind
         const eq = eqClauseText(args as Record<string, unknown>)
         const whereText = combineWhereText([eq])
         const desc = await engine.describe(table)
@@ -112,9 +104,10 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
           }
           const aggSels = metrics.map((m, i) => `${m.sql} AS __a${i}`)
           const rows = await engine.run(
-            `SELECT ${quoteIdent(gb)} AS __value, ${aggSels.join(', ')} FROM ${table} ${whereText} `
+            `SELECT ${quoteIdent(gb)} AS __value, count(*) OVER () AS __groups, ${aggSels.join(', ')} FROM ${table} ${whereText} `
             + `GROUP BY 1 ORDER BY count(*) DESC LIMIT ${AGG_GROUP_LIMIT}`,
           )
+          const totalGroups = Number(rows[0]?.__groups ?? 0)
           const outRows = rows.map((r) => {
             const o: Record<string, unknown> = { value: normalizeValue(r.__value) }
             metrics.forEach((m, i) => { o[m.key] = normalizeValue(r[`__a${i}`]) })
@@ -122,10 +115,10 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
           })
           return {
             ok: true, kind, scope: 'full_table',
-            sourceCount, resultCount: outRows.length, displayedCount: 0,
+            sourceCount, resultCount: outRows.length, displayedCount: 0, totalGroups, truncated: totalGroups > outRows.length,
             rows: outRows as unknown as JsonValue,
-            note: `全表 ${sourceCount} 行上按 ${gb} 分组聚合，共 ${outRows.length} 组（未上图，rows 即结果）。`,
-            message: `按 ${gb} 分组共 ${outRows.length} 组（全表 ${sourceCount} 行上计算；where 子集已生效）。`,
+            note: `全表 ${sourceCount} 行上按 ${gb} 分组聚合，共 ${totalGroups} 组，返回 ${outRows.length} 组${totalGroups > outRows.length ? '（已截断）' : ''}（未上图）。`,
+            message: `按 ${gb} 分组共 ${totalGroups} 组，返回 ${outRows.length} 组（全表 ${sourceCount} 行上计算；where 子集已生效）。`,
           }
         }
 
@@ -156,9 +149,10 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
           + `floor((${expr.lat} - ${lat0}) / ${dLat})::BIGINT AS j`
           + (fieldSels.length ? `, ${fieldSels.join(', ')}` : '')
           + ` FROM ${table} ${whereText}) `
-          + `SELECT i, j, ${aggSels.join(', ')} FROM __src GROUP BY i, j `
+          + `SELECT i, j, count(*) OVER () AS __groups, ${aggSels.join(', ')} FROM __src GROUP BY i, j `
           + `ORDER BY count(*) DESC LIMIT ${maxCells}`,
         )
+        const totalGroups = Number(rows[0]?.__groups ?? 0)
         const features: Feature[] = []
         for (const r of rows) {
           const i = Number(r.i); const j = Number(r.j)
@@ -174,16 +168,18 @@ export function registerSpatialAggregateTool(ctx: Context, deps: DuckToolDeps): 
         const push = await pushResult(`空间聚合 - ${layer.name}`, fc, { cluster: false, totalCount: features.length })
         const note = `全表 ${sourceCount} 行上按 ${cellM} 米网格聚合（参考纬度 ${lat0.toFixed(4)}°，`
           + `约 dLon=${dLon.toFixed(6)}° dLat=${dLat.toFixed(6)}°，米制近似），`
-          + `输出 ${features.length} 格（scope=full_table，网格为近似多边形）。`
+          + `共 ${totalGroups} 格，输出 ${features.length} 格${totalGroups > features.length ? '（已截断）' : ''}（scope=full_table，网格为近似多边形）。`
         return {
           ...push,
           ok: true, kind, scope: 'full_table',
-          sourceCount, resultCount: features.length, displayedCount: features.length,
+          sourceCount, resultCount: features.length, displayedCount: features.length, totalGroups, truncated: totalGroups > features.length,
           note,
           message: `${push.message}（${note}）`,
         }
       } catch (err) {
         return { ok: false, message: `空间聚合失败: ${friendlyDuckError(err)}` }
+      } finally {
+        await lease?.release()
       }
     },
   }))

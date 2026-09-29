@@ -1,3 +1,4 @@
+import { acquireLayer, type LayerLease } from '../layer-access.js'
 /**
  * DuckDB 工具注册：webgis_filter_layer / webgis_layer_stats / webgis_export_layer（自 src/duckdb-tools.ts 拆分）。
  */
@@ -36,25 +37,10 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
 
   ctx.tools.register(defineTool({
     name: 'webgis_filter_layer',
-    description:
-      '对**含 DuckDB 内存表的大图层**跑条件筛选 → 新图层（秒回）。**来源不限**：webgis_load_csv 的 CSV、'
-      + 'webgis_load_dataset 的 shp/geojson 大文件、以及本工具产物都带内存表，**只要 webgis_list_layers 里有 duckTable 就能筛**。'
-      + '⚠ 与本工具易混的：**已筛小的普通图层**按属性筛选用 webgis_select_by_value、按位置筛选用 webgis_select_by_location；'
-      + '**几何列图层的围栏/半径筛选**用 webgis_spatial_filter（本工具在几何列图层上只支持 where 列等于筛选）。'
-      + '条件可叠加：where=等于筛选（JSON 对象、多字段取交集）、bbox={west,south,east,north} 经纬度范围、'
-      + 'radius（米）+ center={lon,lat} 圆心半径（haversine 大圆距离）、'
-      + 'polygon=GeoJSON 面（或 polygonLayer=面图层 id）做围栏内筛选（ST_Within，跑全表，需已联网装过 spatial 扩展）。'
-      + '结果按行数自动决定加载：≤5 万直接上图、5万~10万先询问用户是否聚合（返回 need_confirm）、'
-      + '10万~20万自动聚合（supercluster）、>20 万不加载返回缩小范围建议。'
-      + '几何列图层（无经纬度列，如 shp/geojson 的几何列）仅支持 where 列等于筛选；'
-      + 'bbox/radius/polygon 依赖经纬度列，暂不支持。'
-      + '新图层保留 DuckDB 内存表（可继续链式筛选），移除时自动释放。'
-      + '只要图层有内存表就能用（不看 source；shp/geojson 大层与 csv 一样有完整 duck 表与属性列）。'
-      + '⚠ webgis_list_layers 里 materialized=false 表示「地图上显示的只是抽样」，此时**必须**用本工具在全表上筛，'
-      + '用 Turf 类工具（select_by_value 等）只会筛到抽样、结果看着正常其实是错的。'
-      + '⚠ 不含 webgis_sql_layer 的产物 —— SQL 结果已物化、不带内存表，传进来会报错；要在 SQL 结果上再筛请用 webgis_select_by_value。',
+    description: '组合筛选图层完整数据并生成新图层。where 多字段等值、bbox 范围、center+radius 球面米距离、polygon/polygonLayer 面内筛选（ST_Within，不含边界）可叠加。自动识别普通图层和全表来源。'
+      + '结果保留完整命中集，limit 只限制显示；超过加载上限返回缩小范围建议。单字段比较/包含可用 webgis_select_by_value。',
     parameters: {
-      layer: { type: 'string', required: true, description: '目标 DuckDB CSV 图层 id（webgis_list_layers 查看）' },
+      layer: { type: 'string', required: true, description: '目标图层 id' },
       where: { type: 'json', description: '等于筛选：JSON 对象 {"adname":"天河区"}，多字段取交集' },
       bbox: { type: 'json', description: '经纬度范围 {"west":113,"south":22.8,"east":114,"north":23.5}' },
       center: { type: 'json', description: '圆心 {"lon":113.32,"lat":23.11}（配 radius 用）' },
@@ -92,56 +78,40 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const { resolve, pushResult } = sess(exec)
-      const layer = resolve(args.layer)
-      if (typeof layer === 'string') return { ok: false, message: layer }
-      const table = layer.duckTable
-      const coords = layer.duckCoords
-      const geom = layer.duckGeom
-      if (!table) {
-        return { ok: false, message: `图层 ${layer.id} 不是 DuckDB 大文件图层（无内存表；请先用 webgis_load_csv 加载）` }
-      }
-      if (!coords && !geom) {
-        return { ok: false, message: `图层 ${layer.id} 缺 DuckDB 经纬度/几何列信息` }
-      }
-      // 几何图层（无经纬度列）：bbox/radius/polygon 依赖经纬度列，暂不支持（列为后续项）。
-      if (geom && !coords) {
-        const wantsSpatialParams = (args.bbox && typeof args.bbox === 'object')
-          || (args.center && typeof args.center === 'object')
-          || args.radius != null
-          || (args.polygon && typeof args.polygon === 'object')
-          || (typeof args.polygonLayer === 'string' && args.polygonLayer)
-        if (wantsSpatialParams) {
-          return {
-            ok: false,
-            message: `图层 ${layer.id} 是几何列图层（无经纬度列），bbox/radius/polygon 围栏筛选暂不支持；`
-              + '可改用 where 做列等于筛选，或先用 webgis_sql_layer 投影出经纬度列。',
+      const original = resolve(args.layer)
+      if (typeof original === 'string') return { ok: false, message: original }
+      let lease: LayerLease | undefined
+      let resultTable: string | undefined
+      try {
+        lease = await acquireLayer(engine, original)
+        const layer = lease.layer
+        const table = layer.duckTable
+        const coords = layer.duckCoords
+        const geom = layer.duckGeom
+        const parts = [buildEqualityClause(args as Record<string, unknown>)]
+        if (args.bbox) {
+          const bb = args.bbox as { west?: unknown; south?: unknown; east?: unknown; north?: unknown }
+          const w = num(bb.west), south = num(bb.south), east = num(bb.east), n = num(bb.north)
+          if (w == null || south == null || east == null || n == null || w > east || south > n) throw new Error('bbox 需合法 west/south/east/north')
+          if (coords) parts.push(bboxPredText(quoteIdent(coords.lon), quoteIdent(coords.lat), { west: w, south, east, north: n }))
+          else {
+            if (!(await engine.ensureSpatial())) throw new Error('空间筛选需要 spatial 扩展')
+            parts.push(`ST_Intersects(${rowGeomExprOf(duckGeomSourceOf(layer))}, ST_MakeEnvelope(${w}, ${south}, ${east}, ${n}))`)
           }
         }
-      }
-      let clause: string
-      try {
-        if (geom && !coords) {
-          clause = buildFilterClause(args as Record<string, unknown>, { lon: '', lat: '' })
-        } else {
-          clause = buildFilterClause(args as Record<string, unknown>, coords as { lon: string; lat: string })
-          const wantsPolygon = (args.polygon && typeof args.polygon === 'object')
-            || (typeof args.polygonLayer === 'string' && args.polygonLayer)
-          if (wantsPolygon) {
-            if (!(await engine.ensureSpatial())) {
-              return {
-                ok: false,
-                message: '围栏筛选需要 DuckDB spatial 扩展（首次需联网 INSTALL spatial，之后本地缓存）；'
-                  + '当前无法加载，可改用 bbox/radius 或先 webgis_filter_layer 筛出子集后用 Turf 的 select_by_location。',
-              }
-            }
-            const poly = buildPolygonClause(args as Record<string, unknown>, coords as { lon: string; lat: string }, resolve)
-            if (poly) clause = clause ? `${clause} AND ${poly}` : `WHERE ${poly}`
-          }
+        if (args.center !== undefined || args.radius !== undefined) {
+          const p = await requirePointableLonLat(engine, layer)
+          const c = args.center as { lon?: unknown; lat?: unknown } | undefined
+          const lon = num(c?.lon), lat = num(c?.lat), radius = num(args.radius)
+          if (lon == null || lat == null || radius == null || radius < 0) throw new Error('radius 需非负米数并配 center={lon,lat}')
+          parts.push(haversinePredText(p.lon, p.lat, lon, lat, radius))
         }
-      } catch (err) {
-        return { ok: false, message: friendlyDuckError(err) }
-      }
-      try {
+        if (args.polygon !== undefined || args.polygonLayer !== undefined) {
+          if (!(await engine.ensureSpatial())) throw new Error('围栏筛选需要 spatial 扩展')
+          const fence = fenceWktText(args as Record<string, unknown>, resolve)
+          parts.push(`ST_Within(${rowGeomExprOf(duckGeomSourceOf(layer))}, ST_GeomFromText(${inlineValue(fence)})::GEOMETRY)`)
+        }
+        const clause = combineWhereText(parts)
         const cnt = await engine.run(`SELECT count(*) AS c FROM ${table} ${clause}`)
         const count = Number(cnt[0]?.c ?? 0)
         const thr = effectiveCluster(undefined)
@@ -168,6 +138,7 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
         }
         // 物化结果表（链式筛选用）+ 从上图。
         const resTable = engine.nextTableName()
+        resultTable = resTable
         await engine.createFilterTable(resTable, table, clause)
         const cap = finiteInt(args.limit)
         let fc: FeatureCollection
@@ -189,6 +160,7 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
           ...(geom ? { duckGeom: { column: geom.column, format: geom.format, sourceCrs: geom.sourceCrs } } : {}),
           totalCount: count,
         })
+        resultTable = undefined
         return {
           ...push,
           status: 'ok',
@@ -198,20 +170,18 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
         }
       } catch (err) {
         return { ok: false, message: `筛选失败: ${friendlyDuckError(err)}` }
+      } finally {
+        if (resultTable) await engine.dropTable(resultTable).catch(() => {})
+        await lease?.release()
       }
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'webgis_layer_stats',
-    description:
-      '对**含 DuckDB 内存表的大图层**跑**全表**统计：总行数 +（可选字段的）'
-      + 'distinct 去重数 / min / max / avg + Top10 分布。不物化数据、不建图层。**来源不限**（csv / shp / geojson 大层，'
-      + '只要 webgis_list_layers 里有 duckTable）。'
-      + '统计类查询优先用它而不是 webgis_sql_layer。'
-      + '⚠ materialized=false 的图层（地图上只是抽样）做统计**只能**用本工具：webgis_feature_summary 只统计上图抽样，结论会偏。',
+    description: '返回图层完整数据概览：总行数，可选字段的去重数、最小/最大/均值和 Top10 分布。自动读取全表或当前已物化数据，无需判断来源；不建图层。',
     parameters: {
-      layer: { type: 'string', required: true, description: '目标 DuckDB CSV 图层 id（webgis_list_layers 查看）' },
+      layer: { type: 'string', required: true, description: '目标图层 id' },
       field: { type: 'string', description: '要统计的字段名（缺省只返回总行数）' },
     },
     output: {
@@ -221,6 +191,7 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
         properties: {
           ok: { type: 'boolean', required: true },
           stat: { type: 'string' },
+          scope: { type: 'string' },
           value: { type: 'json' },
           message: { type: 'string' },
         },
@@ -234,10 +205,42 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return { ok: false, message: layer }
       const table = layer.duckTable
-      if (!table) return { ok: false, message: `图层 ${layer.id} 不是 DuckDB 大文件图层（无内存表）` }
+      if (layer.materialized === false && !table) return { ok: false, message: '完整数据不可用，请重新加载；不能统计抽样代替全量' }
       const field = typeof args.field === 'string' && args.field ? args.field : null
       try {
-        const info = await engine.tableInfo(table)
+        if (layer.materialized !== false) {
+          const features = layer.geojson.features
+          const value: Record<string, unknown> = { count: features.length }
+          if (field) {
+            if (!features.some(f => Object.hasOwn(f.properties ?? {}, field))) {
+              // 同 requireField：0 要素时报「图层空」而不是「字段不存在」（后者会让模型
+              // 转告用户"你的数据没有这一列"，而其实有——只是上一层筛空了）。
+              return { ok: false, message: features.length === 0
+                ? `图层 ${layer.id} 没有要素（0 行），无法按字段 ${field} 统计（请先确认筛选条件是否过窄）`
+                : `字段 ${field} 不存在` }
+            }
+            const vals = features.map(f => f.properties?.[field] ?? null)
+            const present = vals.filter(v => v !== null)
+            value.distinct = new Set(present.map(v => JSON.stringify(v))).size
+            const numeric = present.every(v => typeof v === 'number')
+            const sorted = [...present].sort((a, b) => numeric ? Number(a) - Number(b) : String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0)
+            value.min = sorted[0] ?? null
+            value.max = sorted.at(-1) ?? null
+            if (numeric) value.avg = present.length ? present.reduce((a: number, b) => a + Number(b), 0) / present.length : null
+            const counts = new Map<string, { value: unknown; count: number }>()
+            for (const v of vals) {
+              const key = JSON.stringify(v)
+              const entry = counts.get(key) ?? { value: v, count: 0 }
+              entry.count++
+              counts.set(key, entry)
+            }
+            value.top = [...counts.values()].sort((a, b) => b.count - a.count).slice(0, 10)
+          }
+          return { ok: true, scope: 'full_table', stat: field ?? 'count', value: value as JsonValue,
+            message: `图层 ${layer.id} 共 ${features.length} 行（完整图层统计）` }
+        }
+        const info = await engine.tableInfo(table!)
+        if (field && !(await engine.describe(table!)).some(c => c.name === field)) return { ok: false, message: `字段 ${field} 不存在` }
         const value: Record<string, unknown> = { count: info.count }
         if (field) {
           const fid = escIdent(field)
@@ -273,6 +276,7 @@ export function registerLayerFilterTools(ctx: Context, deps: DuckToolDeps): void
         }
         return {
           ok: true,
+          scope: 'full_table',
           stat: field ? `字段 ${field} 统计（图层 ${layer.id}，共 ${info.count} 行）` : `图层 ${layer.id} 总行数`,
           value: value as unknown as JsonValue,
           message: `图层 ${layer.id} 共 ${info.count} 行${field ? `；字段 ${field} 统计完成` : ''}`,

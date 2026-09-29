@@ -221,7 +221,8 @@ async function nativeVisionCall(
   const imgBlock: ContentBlock = { type: 'image', attachment: ref }
   const message = createUserMessage({
     content: [imgBlock, { type: 'text', text: prompt } as ContentBlock],
-    source: { kind: 'plugin', plugin: 'webgis' },
+    // 0.1.7 起没有通用的 'plugin' kind，改用本插件自声明的 kind（见 src/dsh-llm-augment.d.ts）。
+    source: { kind: 'webgis' },
   })
   const chunks = ctx.llm.stream({ provider, model, messages: [message], maxTokens: VISION_MAX_TOKENS, signal })
   let textOut = ''

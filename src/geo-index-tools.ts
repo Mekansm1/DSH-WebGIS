@@ -90,7 +90,7 @@ export function registerIndexTools(ctx: Context, rt: GeoToolRuntime): void {
           ok: false,
           stat: 'stat_inspect',
           value: { layers: [] },
-          message: '当前会话还没有任何图层：请先加载数据（webgis_load_dataset / webgis_load_csv / 数据库查询上图）再做统计。',
+          message: '当前会话还没有任何图层：请先加载数据（webgis_load_dataset / 数据库查询上图）再做统计。',
         })
       }
 

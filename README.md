@@ -4,6 +4,48 @@ A WebGIS plugin that lets LLMs truly see the geographic world. Built on DeepSeek
 
 Author: Frank Wang · Feedback: [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
 
+## Compatibility
+
+- **Requires DSH `0.1.7`** (built and tested against `0.1.7-rc.2`). This release is **not compatible with earlier harness versions**: three harness APIs it depends on changed in 0.1.7. If you are on an older DSH, upgrade the harness before updating this plugin.
+- Targets the DSH **Web profile** and requires the host `webServer` service. The official Desktop transport is not yet supported.
+- Install: `npx --yes @deepseek-ai/dsh plugin --profile web add dsh-webgis`
+- pnpm ≥ 10 needs no `approve-builds` step: DuckDB ships as the official Node Neo package (`@duckdb/node-api`) with a platform-specific prebuilt binding through optional dependencies. A normal `pnpm install` is sufficient. The platform still has to be one DuckDB Node Neo supports, and packages must be fetchable from the npm registry.
+
+## What's New in 0.1.5
+
+### Harness 0.1.7 adaptation
+
+Three harness APIs changed in 0.1.7; all three are adapted here.
+
+- **Current-session lookup.** The harness removed `SessionListState.current`. On 0.1.7 the previous lookup silently returned nothing, so the browser half could not tell the host which conversation it was in. The two sides then wrote to different state buckets, and **every tool that waits for the browser to answer — `webgis_get_pick`, `webgis_export_basemap`, `webgis_export_map` — timed out**, while the map itself kept rendering, picking and navigating normally. Resolved through the harness's own `retainedBy.mainView` rule.
+- **Plugin settings page.** The `settings.plugin.item` slot was removed — that page is now a read-only inventory of the plugins a deployment ships. The WebGIS card is registered as a tab through `settings.plugins.tab` instead.
+- **Vision chain message source.** The shared `'plugin'` message-source kind was removed from the harness vocabulary; the plugin now declares its own kind, which is how the harness documents producers extending that union.
+
+Behaviour note: now that the browser half resolves a real session id, the GIS / traditional mode choice is stored **per conversation** again — it had been collapsing into a single shared slot. Each conversation is selected once.
+
+### Tools: unified and auto-routed
+
+- File loading is one entry point, `webgis_load_dataset`, covering GeoJSON, CSV, shapefile (`.zip` / `.shp`) and GDAL-readable vectors (`.gdb` / `.gpkg` / `.kml` / `.tab` / `.mif` / `.dgn`). CSV options: `lonField`, `latField`, `geometryColumn`, `sourceCrs`, `filter`, `limit`; local `*.csv` wildcards and SSRF-protected remote CSV downloads are supported.
+- Attribute filters, location filters, field summaries and spatial filtering/aggregation now **choose their own data path**. A layer displaying a sample is analysed over its full backing data; when the full data is unavailable the tool reports an error instead of quietly answering from the sample.
+- CSV `filter` defines the layer's real subset — rendering and later analysis both follow it. `limit` caps displayed rows without discarding data: small files take the first N rows in source order (repeatable), large files sample N at random. Above 100k rows the map renders the complete data by zoom level, and the tool message says so rather than claiming to show N rows.
+- Empty style updates are rejected; a partly invalid style update leaves the layer unchanged. Spatial aggregation reports truncated group/grid output explicitly.
+- Tool descriptions are shorter and standard GIS operations stay separate. 55 tools are exposed.
+
+| Previous call | Replacement |
+| --- | --- |
+| `webgis_load_csv({path, ...})` | `webgis_load_dataset({url, ...})` |
+| `webgis_set_layer_color({layer, color})` | `webgis_set_layer_style({layer, color})` |
+| `webgis_set_attribute({...})` | `webgis_edit_field({action: "set", ...})` |
+| `webgis_add_column({...})` | `webgis_edit_field({action: "add", ...})` |
+| `webgis_add_sequence({...})` | `webgis_edit_field({action: "sequence", ...})` |
+
+The previous names are no longer registered. `webgis_feature_summary` returns one requested field statistic; `webgis_layer_stats` returns a count/distribution overview — both over the complete layer, independent of the display sample. Geometry-dependent operations still need the DuckDB spatial extension on the full-table path.
+
+### Failures now say what went wrong
+
+- A browser-to-host reply that fails is no longer swallowed. Screenshot and basemap replies used to discard transport errors silently, leaving a bare timeout as the only symptom; a failed reply is now reported back and surfaced as a named error.
+- Those timeouts also name their cause — whether the browser never connected, connected but is not attached to this conversation, or is polling normally and simply did not finish the step.
+
 ## What's New in 0.1.4
 
 - Added a Worker-based execution path for geometry and spatial-statistics operations, selected by operation-specific workload thresholds.
@@ -13,33 +55,30 @@ Author: Frank Wang · Feedback: [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
 
 Scope: small workloads still execute synchronously on the host thread. Workload thresholds do not guarantee that every complex geometry runs off-thread; this release does not promise universally non-blocking execution. Worker payload encoding and result decoding also require host-thread work.
 
-Compatibility: this release targets the DSH **Web profile** and requires the host's `webServer` service. The official Desktop transport is **not yet supported**. The existing DSH `0.1.5-rc1` compatibility baseline is unchanged; this is not a claim of validation against newer Desktop releases.
+Compatibility: this release targets the DSH **Web profile** and requires the host's `webServer` service. The official Desktop transport is **not yet supported**. That release's DSH `0.1.5-rc1` baseline was superseded in 0.1.5 — see [Compatibility](#compatibility).
 
-### What's New in 0.1.3
+## What's New in 0.1.3
 
 - Migrated to DuckDB's official Node Neo driver (`@duckdb/node-api`). Installing the plugin no longer requires compiling the legacy `duckdb` native module, `pnpm approve-builds`, or `pnpm rebuild duckdb`.
 - Optimized very large CSV coordinate-point layers: DuckDB reads coordinates in columnar chunks and builds GeoArrow directly, avoiding huge numbers of `{ lon, lat }` JavaScript objects.
 - Sampling, viewport culling, empty-view behavior, and picking semantics remain unchanged. Line, polygon, and geometry-column layers continue to use the established WKB conversion path.
 
-### What's New in 0.1.2
+## What's New in 0.1.2
 
 - Adapted for DSH `0.1.5-rc1`: retargeted the new shell layout (the conversation moved into the host `main` slot) and migrated to the 0.1.5 package set.
 - Export vector features from the basemap. “Export the map data in the current view” extracts real vector-tile features into new point, line, and polygon layers; a request such as “export the rivers” can limit the output to one kind.
 - Added a spatial-statistics suite: Gini, Shannon entropy, and Getis-Ord Gi\* hot-spot analysis with Benjamini–Hochberg FDR correction, in addition to Moran's I. Each index inspects fields, reports what it finds, and asks you to confirm inputs before computing.
 - Unified click highlighting: polygons use a deep-blue outline and blue fill, lines use a thick blue stroke, and points use blue dots, always rendered on top.
 
-### What's New in 0.1.1
+## What's New in 0.1.1
 
 - Fixed the “API key required” watermark on the default Carto raster basemap.
 - Fixed Carto vector basemaps (Positron / Dark / Voyager) not rendering.
 - Added a Measure tool: line length, snapping to previously drawn vertices, and closing a polygon at its start point to show perimeter and area.
 - Improved loading performance for very large SHP files.
 
-Tested against DSH `0.1.5-rc1`.
 
-Install: `npx --yes @deepseek-ai/dsh plugin --profile web add dsh-webgis`
-
-### pnpm and the DuckDB runtime
+## pnpm and the DuckDB runtime
 
 The plugin uses DuckDB's official Node Neo package (`@duckdb/node-api`). It installs a platform-specific prebuilt binding through optional dependencies, so pnpm ≥ 10 does **not** need `pnpm approve-builds` or `pnpm rebuild duckdb`. A normal `pnpm install` is sufficient. The target platform must still be supported by DuckDB Node Neo and be able to download packages from the npm registry.
 
@@ -47,7 +86,7 @@ The plugin uses DuckDB's official Node Neo package (`@duckdb/node-api`). It inst
 
 - 🗺️ Conversational GIS — load data, navigate maps, and run spatial analysis through natural-language tool calls
 - 🚀 Smooth massive-data rendering — from million-row local CSV files to database results with hundreds of thousands of rows, a tiered rendering pipeline keeps the map responsive (see [Massive Data Loading](#massive-data-loading))
-- 🧮 GIS toolbox — 60+ AI-callable tools: buffers, overlays, kernel density, Moran's I, Gini, Shannon entropy, Getis-Ord Gi\*, OD matrices, and hex-bin heatmaps
+- 🧮 GIS toolbox — 55 AI-callable tools: buffers, overlays, kernel density, Moran's I, Gini, Shannon entropy, Getis-Ord Gi\*, OD matrices, and hex-bin heatmaps
 - 🛰️ Read the basemap too — extract rivers, roads, buildings, place names, and other real vector-basemap features into analysable layers
 - 🖌️ Manual workflows — interactively draw points, lines, and polygons; manage layers; import and export SHP / CSV / GeoJSON
 - 🔌 Multiple data sources — PostGIS, local files, the basemap itself, and online map services
@@ -67,7 +106,7 @@ The plugin uses DuckDB's official Node Neo package (`@duckdb/node-api`). It inst
 
 ### Compute: conversational GIS analysis
 
-Once data is loaded, tell the AI something like *“show this as a hex density heatmap”* or *“which points fall inside this polygon?”*. More than 60 geo-processing tools can be chained behind the scenes:
+Once data is loaded, tell the AI something like *“show this as a hex density heatmap”* or *“which points fall inside this polygon?”*. 55 tools can be chained behind the scenes:
 
 - Construct — buffer, centroid, convex hull, bounding box, dissolve, simplify, explode, smooth, grid, Voronoi, and OD matrices that show origin–destination flows
 - Overlay — clip, intersect, difference, and union
@@ -132,7 +171,7 @@ Combined with deck.gl's GPU-driven 3D rendering — hex columns, wall extrusions
 
 ## Installation and Configuration
 
-Requirements: a DSH installation with the web profile, plus `pnpm` on your PATH.
+Requirements: **DSH `0.1.7`** with the web profile, plus `pnpm` on your PATH. (0.1.5 is not compatible with earlier harness versions — see [Compatibility](#compatibility).)
 
 ```bash
 dsh plugin --profile web add dsh-webgis
@@ -140,7 +179,7 @@ dsh plugin --profile web add dsh-webgis
 # Then start a new conversation and select GIS mode.
 ```
 
-Optional configuration (Settings → Plugins → WebGIS plugin configuration, or the plugin configuration file `cordis.patch.yml`):
+Optional configuration (Settings → Plugins → the **WebGIS** tab, or the plugin configuration file `cordis.patch.yml`):
 
 - Vision model — provider / model / baseURL / apiKey. Configure this for visual features such as “where is this place?” and reading a map from a screenshot. If the main model is multimodal, the plugin uses it directly and this can remain empty. If the main model is text-only and no vision model is configured, visual tools still return structured coordinate and feature data, but do not analyse images.
 - PostGIS database — host / port / database / user / password. Passwords are stored in DSH's credential store and never written to disk in plaintext.

@@ -5,6 +5,7 @@
 import type { Point, Map as MapLibreMap } from 'maplibre-gl'
 import type { FeatureCollection } from 'geojson'
 import { sessionUrl } from './sessionUrl.js'
+import { postJsonReportingFailure } from './post-json.js'
 import { isSelectionLayerId } from './map-highlight.js'
 import type { FeaturePayload } from './gis-types.js'
 
@@ -191,10 +192,8 @@ export function recordPick(
   const payload: Record<string, unknown> = { lng, lat, features }
   if (captureSeq !== undefined) payload.captureSeq = captureSeq
   if (shot) payload.screenshot = shot
-  fetch(sessionUrl(sessionId, '/webgis/pick'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  }).catch(() => {})
+  // 原先这里是 fetch(...).catch(() => {}) —— 回传被拒（体积 413 / 路由 404 / 断网）时完全静默，
+  // host 侧只剩一句「截图超时」。改为失败时把原因也送回去（见 post-json.ts）。
+  void postJsonReportingFailure('/webgis/pick', sessionId, payload)
   return shot
 }

@@ -329,9 +329,9 @@ test('抽样层上的写属性/新增字段/重投影/属性连接被拦下（�
   state.layers = [sampled]
 
   for (const [tool, args] of [
-    ['webgis_set_attribute', { layer: 'ds_sampled', field: 'tag', value: 'x' }],
-    ['webgis_add_column', { layer: 'ds_sampled', field: 'newcol' }],
-    ['webgis_add_sequence', { layer: 'ds_sampled' }],
+    ['webgis_edit_field', { action: 'set', layer: 'ds_sampled', field: 'tag', value: 'x' }],
+    ['webgis_edit_field', { action: 'add', layer: 'ds_sampled', field: 'newcol' }],
+    ['webgis_edit_field', { action: 'sequence', layer: 'ds_sampled' }],
     ['webgis_reproject', { layer: 'ds_sampled', to: 'mercator' }],
   ]) {
     const out = await run(tool, args)

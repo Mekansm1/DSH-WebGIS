@@ -122,7 +122,7 @@ export function text(content: string): ContentBlock[] {
   return [{ type: 'text', text: content }]
 }
 
-export const COMMON = '作用于当前 GIS 图层。图层 id 一律以 webgis_list_layers 返回为准（配置里的基础数据集=dataset；加载与工具产物形如 ds_<n>、csv_<n>、db_<n>、import_<n>、result_<n>）。'
+export const COMMON = ''
 
 /**
  * 「会隔离执行的重计算工具」共用的描述后缀。
@@ -182,6 +182,9 @@ export function applyStyle(
   },
 ): string | null {
   const { color, pointRadius, pointStrokeWidth, fillColor, thematic } = patch
+  // 先在副本上完成校验，失败时不留下部分样式变更。
+  const target = layer
+  layer = { ...target }
   if (color !== undefined) {
     const c = normalizeColor(color)
     if (!c) return '无法识别的颜色，请用十六进制 #rrggbb/#rgb 或颜色名（如 red / orange / 蓝）'
@@ -211,6 +214,8 @@ export function applyStyle(
     if (thematic === null) delete layer.thematic
     else layer.thematic = thematic
   }
+  Object.assign(target, layer)
+  if (layer.thematic === undefined) delete target.thematic
   return null
 }
 
@@ -273,7 +278,9 @@ export type FullTableAttrFilter = (
 /** 域工具注册所需的 host 注入依赖（可选；缺省时相关能力自动退回原路线）。 */
 export interface GeoToolDeps {
   /** 大图层属性筛选下推到 DuckDB 全表。 */
+  filterFullLocation?: (layer: GisLayer, relation: string, overlay?: GisLayer, bbox?: number[]) => Promise<FullTableAttrFilterOk | { ok: false; message: string }>
   attrFilterFullTable?: FullTableAttrFilter
+  summarizeFullField?: (layer: GisLayer, field: string, stat: string) => Promise<import('@deepseek-ai/dsh-util-values').JsonValue>
   /**
    * 重 Turf/统计运算的隔离执行器。未注入时（旧宿主/单测）保持同步兼容。
    * `timeoutMs` 应取自 `workerBudget(GEO_TOOL_TIMEOUTS.x)` —— 见 `runGeoOp`。
@@ -321,7 +328,9 @@ export interface GeoToolRuntime {
    * 按属性筛选类工具应改道到这里跑全表，而不是在 geojson 抽样上静默算错。
    * 未注入（单测/裁剪部署）时返回 undefined，调用方退回原 Turf 路线。
    */
+  filterFullLocation?: (layer: GisLayer, relation: string, overlay?: GisLayer, bbox?: number[]) => Promise<FullTableAttrFilterOk | { ok: false; message: string }>
   attrFilterFullTable?: FullTableAttrFilter
+  summarizeFullField?: (layer: GisLayer, field: string, stat: string) => Promise<import('@deepseek-ai/dsh-util-values').JsonValue>
   runGeoJob?: <T>(job: GeoWorkerJob, timeoutMs: number, opts?: { signal?: AbortSignal }) => Promise<T>
   /**
    * 重计算的**唯一派发漏斗**：门控（该不该隔离）+ 转发 `exec.signal` + 超时预算 + 统一错误形态。
@@ -434,6 +443,8 @@ export function createGeoToolRuntime(
     sess,
     pushResult,
     runGeoOp,
+    ...(deps?.filterFullLocation ? { filterFullLocation: deps.filterFullLocation } : {}),
+    ...(deps?.summarizeFullField ? { summarizeFullField: deps.summarizeFullField } : {}),
     ...(deps?.attrFilterFullTable ? { attrFilterFullTable: deps.attrFilterFullTable } : {}),
     ...(deps?.runGeoJob ? { runGeoJob: deps.runGeoJob } : {}),
     hooks,

@@ -65,7 +65,7 @@ function numOf(c: string): string {
  * 已知残余分歧：`1e-7` 这类极小值 JS 给 `'1e-7'`、DuckDB 给 `'1e-07'`（指数补零）。
  * 属文本类运算符 + 极端浮点的角落，不再特殊处理。
  */
-function jsTextOf(c: string, kind: ColumnKind): string {
+export function jsTextOf(c: string, kind: ColumnKind): string {
   if (kind === 'text') return `CAST(${c} AS VARCHAR)`
   const n = numOf(c)
   return `(CASE WHEN ${n} = trunc(${n}) AND abs(${n}) < 1e15`
@@ -202,6 +202,17 @@ export async function duckAttrFilter(
   operator: SelectOperator,
   value: string | undefined,
 ): Promise<AttrFilterResult> {
+  if (!layer.duckTable) return { ok: false, message: '图层没有完整数据表' }
+  try {
+    const cols = await engine.describe(layer.duckTable)
+    const col = cols.find(c => c.name === field)
+    if (!col) return { ok: false, message: `字段 ${field} 不存在` }
+    return filterDuckLayer(engine, layer, `WHERE ${selectWhereSql(field, operator, value, columnKindOf(col.type))}`)
+  } catch (err) { return { ok: false, message: `筛选失败: ${friendlyDuckError(err)}` } }
+}
+
+/** 全表谓词筛选共用的结果表构造与抽样，调用方接管返回表。 */
+export async function filterDuckLayer(engine: DuckDbEngine, layer: GisLayer, whereClause: string): Promise<AttrFilterResult> {
   const base = layer.duckTable
   if (!base) return { ok: false, message: `图层 ${layer.id} 没有 DuckDB 内存表` }
   const geom = layer.duckGeom
@@ -210,11 +221,7 @@ export async function duckAttrFilter(
 
   const resTable = engine.nextTableName()
   try {
-    // 列类型必须从表里查出来传给 selectWhereSql：它决定文本渲染方式（见 jsTextOf）。
-    // 查不到（字段名不存在）时按文本处理，让 DuckDB 自己报「列不存在」而不是我们猜错渲染。
-    const cols = await engine.describe(base)
-    const kind = columnKindOf(cols.find((col) => col.name === field)?.type ?? 'VARCHAR')
-    const count = await engine.createFilterTable(resTable, base, `WHERE ${selectWhereSql(field, operator, value, kind)}`)
+    const count = await engine.createFilterTable(resTable, base, whereClause)
     const cap = Math.min(count, engine.threshold)
     let fc: FeatureCollection
     if (geom) {

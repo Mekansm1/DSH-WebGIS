@@ -73,7 +73,7 @@ export async function requirePointableLonLat(
     const fams = await duckGeomFamiliesOf(engine, layer.duckTable, src.geom)
     if (fams.length === 0) {
       throw new Error(`图层 ${layer.id} 的几何族无法确认（需 DuckDB spatial 扩展读取几何列）。`
-        + '可改用 webgis_load_csv 传经纬度列，或先 webgis_spatial_filter 的 intersects_layer/within_polygon 筛出子集。')
+        + '可改用 webgis_load_dataset 传经纬度列，或先 webgis_spatial_filter 的 intersects_layer/within_polygon 筛出子集。')
     }
     if (!fams.every((f) => f === 'point')) {
       throw new Error(`此操作仅支持点状源：图层 ${layer.id} 几何族为 ${fams.join('/')}（线/面/混合几何无单一中心点）。`
@@ -105,12 +105,24 @@ let csvSeq = 0
 
 /** pushResult 的额外句柄（duck 表/坐标列/几何列/真实行数/几何族）。 */
 export interface PushExtra {
+  source?: GisLayer['source']
   cluster?: boolean
   duckTable?: string
   duckCoords?: { lon: string; lat: string }
   duckGeom?: DuckGeomSpec
   totalCount?: number
   families?: GeomFamily[]
+  /**
+   * geojson 是否装着**全部数据**。缺省按 `fc.features.length >= totalCount` 推。
+   *
+   * ⚠ 绝不能再用 `!duckTable` 反推（那是旧行为，已修）：**"留了内存表"与"geojson 只是抽样"是两件事**——
+   * 筛选结果既留表（供链式筛选）又把**全部命中行**都放进了 geojson。用 !duckTable 推会把这类图层
+   * 误判成抽样，于是 16 个 `requireMaterialized` 守卫点全部拒绝，而错误消息让模型"先用
+   * webgis_filter_layer 筛出全量再分析"——那正是它刚做的事，`load → filter → buffer` 成为死路。
+   */
+  materialized?: boolean
+  /** 全量真实 bbox（ingestion 灌表后已算过）。传了就复用，省掉 pushResult 里第二次全表聚合。 */
+  fullBbox?: BBox | null
 }
 
 /** pushResult 的返回值（工具成功输出的公共形状）。 */
@@ -148,19 +160,21 @@ export function makeSessionResolver(engine: DuckDbEngine, stateFor: (sessionId: 
     const layers = (): GisLayer[] => st.layers
     const resolve = (id: unknown): GisLayer | string => requireLayer(layers(), typeof id === 'string' ? id : '')
     const pushResult = async (name: string, fc: FeatureCollection, extra: PushExtra = {}): Promise<PushResult> => {
-      const id = `csv_${++csvSeq}`
-      // duck 大图层：geojson 只是抽样，全量 bbox 由留表的 duck 全表聚合（抽样 bbox 会把视口裁剪/工具消息带偏）。
-      // 留表了才算（跨表聚合有成本）；非 duck（小文件 DROP 表）不查，bbox=geojson=全量。
-      let fullBbox: BBox | null | undefined
-      if (extra.duckTable) {
+      const id = `${extra.source === 'dataset' ? 'ds' : 'csv'}_${++csvSeq}`
+      // duck 大图层：geojson 只是抽样，全量 bbox 必须由留表的 duck 全表聚合（抽样 bbox 会把视口裁剪/工具消息带偏）。
+      // ingestion 灌表时已算过一次，调用方传了就复用 —— 否则这里会重跑一遍同一条全表聚合。
+      let fullBbox: BBox | null | undefined = extra.fullBbox
+      if (fullBbox === undefined && extra.duckTable) {
         const src: DuckGeomSource = { coords: extra.duckCoords, geom: extra.duckGeom }
         if (src.coords || src.geom) fullBbox = await duckTableFullBBox(engine, extra.duckTable, src)
       }
+      // materialized = 「geojson 是否装着全部数据」，**不是**「有没有留内存表」（见 PushExtra.materialized 注释）。
+      const total = extra.totalCount ?? fc.features.length
       const layer = makeResultLayer({
         id,
         name,
         geojson: fc,
-        source: 'csv',
+        source: extra.source ?? 'csv',
         color: CSV_COLOR,
         cluster: extra.cluster ?? false,
         duckTable: extra.duckTable,
@@ -168,6 +182,7 @@ export function makeSessionResolver(engine: DuckDbEngine, stateFor: (sessionId: 
         duckGeom: extra.duckGeom,
         totalCount: extra.totalCount,
         families: extra.families,
+        materialized: extra.materialized ?? fc.features.length >= total,
         fullBbox,
       })
       st.layers = [...layers(), layer]

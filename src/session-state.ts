@@ -135,6 +135,15 @@ export interface WebgisState {
   capture: { seq: number } | null
   /** 客户端上报的捕获失败信息（一次一报，读取后清空）。 */
   captureError: string | null
+  /**
+   * 客户端最近一次拉取 `/webgis/state` 的时刻（由该路由写入，`null` = 从未拉过）。
+   *
+   * 用途：把「等客户端回传」类超时从**不可诊断**变成可诊断 —— 超时到底是
+   * ①客户端根本没挂载（从未拉状态）②客户端掉线了（很久没拉）还是
+   * ③客户端在正常轮询、只是没完成这次操作（该去查它自己的报错），
+   * 这三种成因的处置完全不同，而原先只有一句"超时"。
+   */
+  lastClientPollAt: number | null
   /** host 发起的出图请求（AI 工具 webgis_export_map 设置；客户端见新 seq → 打开出图弹窗并预填）。 */
   exportRequest: { seq: number; params: ExportRequestParams } | null
   /** 出图等待被打断的原因（用户关掉了出图弹窗）→ 等待者立刻返回，不必干等 60s 超时。 */
@@ -159,7 +168,7 @@ const ANON_KEY = 'anon'
 
 export function emptyWebgisState(): WebgisState {
   return {
-    dataset: null, navigate: null, pick: null, capture: null, captureError: null,
+    dataset: null, navigate: null, pick: null, capture: null, captureError: null, lastClientPollAt: null,
     exportRequest: null, exportImage: null, exportError: null,
     basemapRequest: null, basemapResult: null, basemapError: null,
     layers: [],

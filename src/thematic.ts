@@ -242,7 +242,7 @@ export function buildThematic(fc: FeatureCollection, opts: ThematicOptions): The
       return { ok: false, message: `字段 ${field} 没有任何非空取值，无法按类别上色` }
     }
     if (counts.size === 1) {
-      return { ok: false, message: `字段 ${field} 只有一个取值（${[...counts.keys()][0]}），不需要专题配色 —— 用 webgis_set_layer_color 单色即可` }
+      return { ok: false, message: `字段 ${field} 只有一个取值（${[...counts.keys()][0]}），不需要专题配色 —— 用 webgis_set_layer_style 的 color 参数设置单色即可` }
     }
     const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
     const truncated = sorted.length > MAX_CATEGORIES
@@ -277,7 +277,7 @@ export function buildThematic(fc: FeatureCollection, opts: ThematicOptions): The
   }
   const { min, max } = minMax(xs)
   if (!(max > min)) {
-    return { ok: false, message: `字段 ${field} 取值恒定（${min}），无法分箱 —— 用 webgis_set_layer_color 单色即可` }
+    return { ok: false, message: `字段 ${field} 取值恒定（${min}），无法分箱 —— 用 webgis_set_layer_style 的 color 参数设置单色即可` }
   }
   const k = Math.max(2, Math.min(opts.classes ?? DEFAULT_CLASSES, MAX_CLASSES))
   const { sample, sampled } = method === 'jenks' ? pickSample(xs, JENKS_SAMPLE_CAP) : { sample: xs, sampled: false }

@@ -181,17 +181,17 @@ test('DuckDbEngine.arrowIpc：Node Neo 未提供 IPC 导出时稳定回退 null'
   }
 })
 
-test('webgis_load_csv：小文件常规加载（全部上图、不留内存表）', async () => {
+test('webgis_load_dataset：小文件常规加载（全部上图、不留内存表）', async () => {
   const engine = new DuckDbEngine()
   const { state, run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   assert.equal(out.ok, true)
   assert.equal(out.status, 'small')
   assert.equal(out.totalCount, 200)
   assert.equal(out.featureCount, 200)
   assert.equal(out.table, '')
   const layer = state.layers[0]
-  assert.equal(layer.source, 'csv')
+  assert.equal(layer.source, 'dataset')
   assert.equal(layer.duckTable, undefined)
   assert.equal(layer.cluster, false)
   assert.equal(layer.renderer, 'maplibre')
@@ -202,10 +202,10 @@ test('webgis_load_csv：小文件常规加载（全部上图、不留内存表�
   await engine.close()
 })
 
-test('webgis_load_csv：大文件抽样+cluster+保留内存表；移除图层联动 DROP', async () => {
+test('webgis_load_dataset：大文件抽样+cluster+保留内存表；移除图层联动 DROP', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run, removed } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'poi.csv') }) // 200 行 > 阈值 50
+  const out = await run('webgis_load_dataset', { url: join(dir, 'poi.csv') }) // 200 行 > 阈值 50
   assert.equal(out.ok, true)
   assert.equal(out.status, 'loaded')
   assert.equal(out.totalCount, 200)
@@ -227,57 +227,57 @@ test('webgis_load_csv：大文件抽样+cluster+保留内存表；移除图层�
   await engine.close()
 })
 
-test('webgis_load_csv：filter 只上图匹配子集（含中文列名）', async () => {
+test('webgis_load_dataset：filter 定义完整图层子集（含中文列名）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'city.csv'), filter: { 城市: '广州' } })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'city.csv'), filter: { 城市: '广州' } })
   assert.equal(out.ok, true)
-  assert.equal(out.totalCount, 2)
+  assert.equal(out.totalCount, 1)
   assert.equal(out.featureCount, 1)
   assert.equal(state.layers[0].geojson.features[0].properties.name, '广州塔')
   await engine.close()
 })
 
-test('webgis_load_csv：显式 lonField/latField（列名非标准）', async () => {
+test('webgis_load_dataset：显式 lonField/latField（列名非标准）', async () => {
   const engine = new DuckDbEngine()
   const { run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'xy.csv'), lonField: 'x', latField: 'y' })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'xy.csv'), lonField: 'x', latField: 'y' })
   assert.equal(out.ok, true)
   assert.equal(out.featureCount, 3)
   await engine.close()
 })
 
-test('webgis_load_csv：limit 限制上图子集', async () => {
+test('webgis_load_dataset：limit 限制上图子集', async () => {
   const engine = new DuckDbEngine()
   const { run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'poi.csv'), limit: 10 })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'poi.csv'), limit: 10 })
   assert.equal(out.ok, true)
   assert.equal(out.featureCount, 10)
   await engine.close()
 })
 
-test('webgis_load_csv：无经纬度列 → ok:false（提示可传字段或改用 webgis_load）', async () => {
+test('webgis_load_dataset：无经纬度列 → ok:false（提示可传字段或改用 webgis_load）', async () => {
   const engine = new DuckDbEngine()
   const { run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'nogeom.csv') })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'nogeom.csv') })
   assert.equal(out.ok, false)
   assert.match(out.message, /经纬度/)
   await engine.close()
 })
 
-test('webgis_load_csv：路径不存在 → ok:false', async () => {
+test('webgis_load_dataset：路径不存在 → ok:false', async () => {
   const engine = new DuckDbEngine()
   const { run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'nope.csv') })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'nope.csv') })
   assert.equal(out.ok, false)
   await engine.close()
 })
 
-test('webgis_load_csv：会话隔离（不同 agent 各看各的图层）', async () => {
+test('webgis_load_dataset：会话隔离（不同 agent 各看各的图层）', async () => {
   const engine = new DuckDbEngine()
   const { run, stateFor } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') }, 'alice')
-  await run('webgis_load_csv', { path: join(dir, 'city.csv') }, 'bob')
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') }, 'alice')
+  await run('webgis_load_dataset', { url: join(dir, 'city.csv') }, 'bob')
   assert.equal(stateFor('alice').layers.length, 1)
   assert.equal(stateFor('bob').layers.length, 1)
   assert.equal(stateFor(undefined).layers.length, 0)
@@ -287,7 +287,7 @@ test('webgis_load_csv：会话隔离（不同 agent 各看各的图层）', asyn
 test('webgis_filter_layer：where 等于筛选 → 新表新图层（可链式再筛）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') }) // 200 行大文件
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') }) // 200 行大文件
   const base = state.layers[0]
   assert.ok(base.duckTable)
 
@@ -310,7 +310,7 @@ test('webgis_filter_layer：where 等于筛选 → 新表新图层（可链式�
 test('webgis_filter_layer：bbox 范围筛选', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   // poi.csv 的 lon/lat 在 113.0~113.99 / 23.0~23.99；切右上象限
   const out = await run('webgis_filter_layer', { layer: layer.id, bbox: { west: 113.5, south: 23.5, east: 114, north: 24 } })
@@ -323,7 +323,7 @@ test('webgis_filter_layer：bbox 范围筛选', async () => {
 test('webgis_filter_layer：radius + center 半径筛选', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   const out = await run('webgis_filter_layer', { layer: layer.id, center: { lon: 113.5, lat: 23.5 }, radius: 2000 })
   assert.equal(out.ok, true)
@@ -332,22 +332,22 @@ test('webgis_filter_layer：radius + center 半径筛选', async () => {
   await engine.close()
 })
 
-test('webgis_filter_layer：非 DuckDB 图层 → ok:false', async () => {
+test('webgis_filter_layer：普通图层自动筛选完整数据', async () => {
   const engine = new DuckDbEngine()
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'city.csv') }) // 小文件 → 无内存表
+  await run('webgis_load_dataset', { url: join(dir, 'city.csv') }) // 小文件 → 无内存表
   const layer = state.layers[0]
   assert.equal(layer.duckTable, undefined)
   const out = await run('webgis_filter_layer', { layer: layer.id, where: { 城市: '广州' } })
-  assert.equal(out.ok, false)
-  assert.match(out.message, /不是 DuckDB 大文件图层/)
+  assert.equal(out.ok, true, out.message)
+  assert.equal(out.count, 1)
   await engine.close()
 })
 
 test('webgis_layer_stats：行数 + 字段统计 + Top 分布', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   const out = await run('webgis_layer_stats', { layer: layer.id, field: 'city' })
   assert.equal(out.ok, true)
@@ -364,7 +364,7 @@ test('webgis_layer_stats：行数 + 字段统计 + Top 分布', async () => {
 test('webgis_sql_layer：__layer__ 占位 + 无经纬度结果给预览', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   const out = await run('webgis_sql_layer', {
     layer: layer.id,
@@ -380,7 +380,7 @@ test('webgis_sql_layer：__layer__ 占位 + 无经纬度结果给预览', async 
 test('webgis_sql_layer：结果含经纬度 → 上图', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   const out = await run('webgis_sql_layer', {
     layer: layer.id,
@@ -396,7 +396,7 @@ test('webgis_sql_layer：结果含经纬度 → 上图', async () => {
 test('webgis_sql_layer：结果超 limit 拒绝', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   const out = await run('webgis_sql_layer', { layer: layer.id, sql: 'SELECT * FROM __layer__', limit: 10 })
   assert.equal(out.ok, true)
@@ -408,7 +408,7 @@ test('webgis_sql_layer：结果超 limit 拒绝', async () => {
 test('webgis_sql_layer：写操作/分号/注释被拒', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const layer = state.layers[0]
   for (const bad of [
     'DROP TABLE __layer__',
@@ -424,7 +424,7 @@ test('webgis_sql_layer：写操作/分号/注释被拒', async () => {
 test('webgis_filter_layer：polygon 围栏筛选（spatial ST_Within）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const base = state.layers[0]
   const poly = {
     type: 'Polygon',
@@ -441,7 +441,7 @@ test('webgis_filter_layer：polygon 围栏筛选（spatial ST_Within）', async 
 test('webgis_filter_layer：polygonLayer 面图层作围栏', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'poi.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })
   const base = state.layers[0]
   const fence = makeResultLayer({
     id: 'fence', name: '围栏', source: 'dataset',
@@ -472,7 +472,7 @@ test('dropLayerResources：GUI 右键删除路径也释放 DuckDB 内存表（#�
 test('webgis_export_layer：导出 CSV / GeoJSON 到指定路径', async () => {
   const engine = new DuckDbEngine()
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'city.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'city.csv') })
   const layer = state.layers[0]
   const csvPath = join(dir, 'out.csv')
   const csv = await run('webgis_export_layer', { layer: layer.id, format: 'csv', path: csvPath })
@@ -553,10 +553,10 @@ test('geometryRowsToGeoJSON：非法/空/坏 JSON 行跳过，几何不进 prope
 
 // 工具层：WKT 列自动上图 / 显式 geometryColumn / lon+lat 优先 / 几何图层筛选（需联网装一次 spatial）
 
-test('webgis_load_csv：WKT 列自动识别 → 任意几何上图（无经纬度不报错）', async () => {
+test('webgis_load_dataset：WKT 列自动识别 → 任意几何上图（无经纬度不报错）', async () => {
   const engine = new DuckDbEngine()
   const { state, run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'wkt.csv') })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'wkt.csv') })
   assert.equal(out.ok, true)
   assert.equal(out.status, 'small')
   assert.equal(out.featureCount, 3)
@@ -568,10 +568,10 @@ test('webgis_load_csv：WKT 列自动识别 → 任意几何上图（无经纬�
   await engine.close()
 })
 
-test('webgis_load_csv：显式 geometryColumn + sourceCrs（转 4326 上图）', async () => {
+test('webgis_load_dataset：显式 geometryColumn + sourceCrs（转 4326 上图）', async () => {
   const engine = new DuckDbEngine()
   const { state, run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'wkt.csv'), geometryColumn: 'wkt', sourceCrs: 'EPSG:3857' })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'wkt.csv'), geometryColumn: 'wkt', sourceCrs: 'EPSG:3857' })
   assert.equal(out.ok, true)
   assert.equal(state.layers[0].duckGeom?.column, 'wkt')
   assert.equal(state.layers[0].duckGeom?.sourceCrs, 'EPSG:3857')
@@ -579,10 +579,10 @@ test('webgis_load_csv：显式 geometryColumn + sourceCrs（转 4326 上图）',
   await engine.close()
 })
 
-test('webgis_load_csv：lon/lat + WKT 共存 → 默认走经纬度点（现状优先）', async () => {
+test('webgis_load_dataset：lon/lat + WKT 共存 → 默认走经纬度点（现状优先）', async () => {
   const engine = new DuckDbEngine()
   const { state, run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'lonlat_wkt.csv') })
+  const out = await run('webgis_load_dataset', { url: join(dir, 'lonlat_wkt.csv') })
   assert.equal(out.ok, true)
   assert.equal(out.status, 'small')
   const layer = state.layers[0]
@@ -595,7 +595,7 @@ test('webgis_load_csv：lon/lat + WKT 共存 → 默认走经纬度点（现状�
 test('webgis_sql_layer：结果含 GEOMETRY 列 → 上图（几何列优先级 > 经纬度）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 2 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'wkt.csv') }) // 3 行 > 阈值 2 → 大文件保留 duckTable
+  await run('webgis_load_dataset', { url: join(dir, 'wkt.csv') }) // 3 行 > 阈值 2 → 大文件保留 duckTable
   const base = state.layers[0]
   const out = await run('webgis_sql_layer', {
     layer: base.id,
@@ -608,10 +608,10 @@ test('webgis_sql_layer：结果含 GEOMETRY 列 → 上图（几何列优先级 
   await engine.close()
 })
 
-test('webgis_filter_layer：几何图层 where 可用、bbox/radius/polygon 明确拒绝、产物继承 duckGeom', async () => {
+test('webgis_filter_layer：几何图层自动支持 where/bbox/polygon，混合几何拒绝 radius', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 2 })
   const { state, run } = setupDuck(engine)
-  await run('webgis_load_csv', { path: join(dir, 'wkt.csv') })
+  await run('webgis_load_dataset', { url: join(dir, 'wkt.csv') })
   const base = state.layers[0]
   assert.ok(base.duckGeom)
   // where 等于筛选照常（基于普通列）
@@ -622,18 +622,19 @@ test('webgis_filter_layer：几何图层 where 可用、bbox/radius/polygon 明�
   assert.equal(w.featureCount, 1)
   const result = state.layers[1]
   assert.deepEqual(result.duckGeom, base.duckGeom, 'filter 产物继承 duckGeom')
-  // bbox / radius / polygon 明确拒绝
+  // bbox/polygon 自动适配几何；混合点面没有单一圆心，radius 明确拒绝
   const b = await run('webgis_filter_layer', { layer: base.id, bbox: { west: 113, south: 23, east: 114, north: 24 } })
-  assert.equal(b.ok, false)
-  assert.match(b.message, /几何列图层/)
+  assert.equal(b.ok, true, b.message)
+  assert.equal(b.count, 3)
   const r = await run('webgis_filter_layer', { layer: base.id, center: { lon: 113.5, lat: 23.5 }, radius: 1000 })
   assert.equal(r.ok, false)
-  assert.match(r.message, /几何列图层/)
+  assert.match(r.message, /点状源/)
   const p = await run('webgis_filter_layer', {
     layer: base.id,
     polygon: { type: 'Polygon', coordinates: [[[113, 23], [114, 23], [114, 24], [113, 24], [113, 23]]] },
   })
-  assert.equal(p.ok, false)
+  assert.equal(p.ok, true, p.message)
+  assert.equal(p.count, 3)
   await engine.close()
 })
 
@@ -718,7 +719,7 @@ const INSIDE_FENCE = 118
 test('webgis_spatial_filter：bbox count_only 与 layer（scope/source/result/displayed）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 20 })
   const { run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId // 200 行 > 阈值 20
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId // 200 行 > 阈值 20
   const bb = { west: 113.5, south: 23.5, east: 114, north: 24 } // i%100 ∈ 50..99 → 100 行
   const cnt = await run('webgis_spatial_filter', { layer: id, mode: 'bbox', bbox: bb, output: 'count_only' })
   assert.equal(cnt.ok, true)
@@ -756,7 +757,7 @@ test('webgis_spatial_filter：bbox count_only 与 layer（scope/source/result/di
 test('webgis_spatial_filter：dwithin 命中数与手算 haversine 对照', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 20 })
   const { run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId
   for (const [lon, lat, r] of [[113.4, 23.3, 3000], [113.5, 23.5, 800], [113.0, 23.0, 50000]]) {
     const exp = expectedDwithin(lon, lat, r)
     const out = await run('webgis_spatial_filter', {
@@ -771,7 +772,7 @@ test('webgis_spatial_filter：dwithin 命中数与手算 haversine 对照', asyn
 test('webgis_spatial_filter：within_polygon（GeoJSON 面，选中已知点）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 20 })
   const { run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId
   const poly = {
     type: 'Polygon',
     coordinates: [[[113.205, 23.205], [113.795, 23.205], [113.795, 23.795], [113.205, 23.795], [113.205, 23.205]]],
@@ -785,8 +786,8 @@ test('webgis_spatial_filter：within_polygon（GeoJSON 面，选中已知点）'
 test('webgis_spatial_filter：intersects_layer duck↔duck 与 duck↔小 GeoJSON', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 20 })
   const { state, run } = setupDuck(engine)
-  const id1 = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId
-  const id2 = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId
+  const id1 = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId
+  const id2 = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId
   // duck ↔ duck：两份相同点表 → 每点坐标都有匹配 → 全 200
   const dd = await run('webgis_spatial_filter', { layer: id1, mode: 'intersects_layer', otherLayerId: id2, output: 'count_only' })
   assert.equal(dd.ok, true)
@@ -817,7 +818,7 @@ test('webgis_spatial_filter：intersects_layer duck↔duck 与 duck↔小 GeoJSO
 test('webgis_spatial_filter：duckGeom(WKT 点/面) within_polygon / intersects_layer（几何列路径）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 2 })
   const { state, run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'wkt.csv') })).layerId // 3 行 > 阈值 2 → duck
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'wkt.csv') })).layerId // 3 行 > 阈值 2 → duck
   const layer = state.layers.find((l) => l.id === id)
   assert.ok(layer.duckGeom)
   const poly = { type: 'Polygon', coordinates: [[[113, 23], [114, 23], [114, 24], [113, 24], [113, 23]]] }
@@ -839,7 +840,7 @@ test('webgis_spatial_filter：duckGeom(WKT 点/面) within_polygon / intersects_
 test('webgis_spatial_filter：duckGeom 纯点层 bbox/dwithin 可用（ST_X/ST_Y 路径）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 2 })
   const { run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'wkt_pts.csv') })).layerId
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'wkt_pts.csv') })).layerId
   const out = await run('webgis_spatial_filter', {
     layer: id, mode: 'bbox', bbox: { west: 113.35, south: 23.15, east: 113.45, north: 23.25 }, output: 'count_only',
   })
@@ -856,7 +857,7 @@ test('webgis_spatial_filter：duckGeom 纯点层 bbox/dwithin 可用（ST_X/ST_Y
 test('webgis_spatial_filter：线/面/混合几何源 bbox 明确拒绝（非点源错误文案）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 2 })
   const { run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'wkt.csv') })).layerId // point+polygon 混合
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'wkt.csv') })).layerId // point+polygon 混合
   const out = await run('webgis_spatial_filter', { layer: id, mode: 'bbox', bbox: { west: 113, south: 23, east: 114, north: 24 } })
   assert.equal(out.ok, false)
   assert.match(out.message, /仅支持点状源/)
@@ -866,7 +867,7 @@ test('webgis_spatial_filter：线/面/混合几何源 bbox 明确拒绝（非点
 test('webgis_spatial_filter：超过加载上限(>20万) → too_many 未加载', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 50 })
   const { run } = setupDuck(engine)
-  const out = await run('webgis_load_csv', { path: join(dir, 'poi_big.csv') }) // 200,020 行
+  const out = await run('webgis_load_dataset', { url: join(dir, 'poi_big.csv') }) // 200,020 行
   assert.equal(out.ok, true)
   const id = out.layerId
   const ly = await run('webgis_spatial_filter', { layer: id, mode: 'bbox', bbox: { west: 113, south: 23, east: 114, north: 24 } })
@@ -882,7 +883,7 @@ test('webgis_spatial_filter：超过加载上限(>20万) → too_many 未加载'
 test('webgis_spatial_aggregate：attribute 分组返回 rows（count/countDistinct）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 20 })
   const { run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId
   const out = await run('webgis_spatial_aggregate', { layer: id, kind: 'attribute', groupBy: 'city' })
   assert.equal(out.ok, true)
   assert.equal(out.scope, 'full_table')
@@ -904,7 +905,7 @@ test('webgis_spatial_aggregate：attribute 分组返回 rows（count/countDistin
 test('webgis_spatial_aggregate：grid 网格计数正确（cell 多边形 + metrics，scope=full_table）', async () => {
   const engine = new DuckDbEngine({ papaparseThreshold: 20 })
   const { state, run } = setupDuck(engine)
-  const id = (await run('webgis_load_csv', { path: join(dir, 'poi.csv') })).layerId
+  const id = (await run('webgis_load_dataset', { url: join(dir, 'poi.csv') })).layerId
   const out = await run('webgis_spatial_aggregate', { layer: id, kind: 'grid', cellSizeMeters: 30000 })
   assert.equal(out.ok, true)
   assert.equal(out.scope, 'full_table')

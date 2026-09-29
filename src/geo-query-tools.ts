@@ -20,9 +20,7 @@ export function registerQueryTools(ctx: Context, rt: GeoToolRuntime): void {
 
   ctx.tools.register(defineTool({
     name: 'webgis_select_by_value',
-    description: COMMON + '按属性字段值筛选要素，输出新图层。数值字段按数值比较，其余按文本；in 用逗号分隔多个值；is_null/not_null 忽略 value。'
-      + '⚠ 大图层（webgis_list_layers 里 materialized=false，地图上只是抽样）本工具会**自动改道到全表**筛选，'
-      + '结果图层仍带着完整内存表、可以继续筛；所以按属性筛选用它不会漏数据。',
+    description: COMMON + '按属性字段值筛选完整图层并生成新图层，自动选择全表或已物化数据。数值字段按数值比较；in 用逗号分隔；is_null/not_null 忽略 value。',
     parameters: {
       layer: LAYER_PARAM,
       field: { type: 'string', required: true, description: '属性字段名（用 webgis_layer_info 查看字段）' },
@@ -40,18 +38,19 @@ export function registerQueryTools(ctx: Context, rt: GeoToolRuntime): void {
       const { resolve, pushResult } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return { ok: false, message: layer }
-      const fieldErr = requireField(layer, args.field)
-      if (fieldErr) return { ok: false, message: fieldErr }
       const value = typeof args.value === 'string' ? args.value : undefined
       const operator = args.operator as SelectOperator
       // 大图层的 geojson 只是上图抽样（≤5 万行），在它上面筛会**静默**给出抽样结果。
       // 改道 DuckDB 跑全表，并把结果内存表挂到新图层上（可继续链式筛选）。
-      if (layer.materialized === false && layer.duckTable && rt.attrFilterFullTable) {
+      if (layer.materialized === false) {
+        if (!layer.duckTable || !rt.attrFilterFullTable) return { ok: false, message: '完整数据筛选不可用，请重新加载；不能在抽样上筛选全量' }
         const full = await rt.attrFilterFullTable(layer, args.field, operator, value)
         if (!full.ok) return { ok: false, message: full.message }
         const push = pushResult('筛选', full.geojson, `${layer.name}(${args.field})`, undefined, undefined, full.extra)
         return { ...push, message: `${push.message}（${full.message}）` }
       }
+      const fieldErr = requireField(layer, args.field)
+      if (fieldErr) return { ok: false, message: fieldErr }
       const out = opSelectByValue(layer, args.field, operator, value)
       return pushResult('筛选', out, `${layer.name}(${args.field})`)
     },

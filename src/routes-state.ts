@@ -15,6 +15,9 @@ import { arrowCacheGet, arrowCacheSet } from './arrow-cache.js'
 import type { RouteApi, RouteHandler } from './route-shared.js'
 
 export const handleState: RouteHandler = (_req, res, _url, _pathname, _sessionId, state, api) => {
+  // 客户端心跳：每次拉状态都记时间戳，供 awaitCurrentViewCapture 等超时消息分辨
+  // 「客户端不在」与「客户端在但没完成」（见 WebgisState.lastClientPollAt）。
+  state.lastClientPollAt = Date.now()
   const datasetLayer = state.layers.find((l) => l.id === 'dataset')
   json(res, {
     baseTileUrl: api.config.baseTileUrl,

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { VisionConfigSection } from './VisionConfigCard.js'
 import { PostgisConfigSection } from './PostgisConfigCard.js'
@@ -74,7 +74,7 @@ export function WebgisConfigCard({ t }: PropsLocale<'webgis'>) {
           <span className={styles.settingsName}>{t('settings.cardName')}</span>
           <span className={styles.settingsDesc}>{t('settings.cardDesc')}</span>
         </span>
-        <IconChevronDownOutline14
+        <IconChevronDownOutlineMedium
           className={open ? `${styles.settingsChevron} ${styles.settingsChevronOpen}` : styles.settingsChevron}
         />
       </button>

@@ -52,22 +52,11 @@ export function registerGeoTools(
       '5. GIS 操作以工具返回的图层 id / 错误消息为准，不臆造图层、字段名或坐标结果。',
       '6. 回复用户保持简短精炼：先给结论，再补必要细节；不展示冗长推理/自我复盘，不重复确认已确认过的事。',
       '7. 查询数据先判断来源（就近优先）：先调 webgis_list_layers 看已加载图层，有则操作图层；无图层且数据库已配置才用 webgis_db_query 查库；用户明确点名表名则直接查库。',
-      '8. 空间分析分流：数据仍在 Duck 大表、需要「全表/全层」的统计或筛选（多少个、落在哪、距某点多远、两层相交）时，'
-        + '优先用 webgis_spatial_filter / webgis_spatial_aggregate，不要先随意抽样再 Turf 下结论（抽样会算错全表结论）。'
-        + '图层已较小（已筛选/圈选）且需要缓冲、叠加、探索制图时，才用现有 webgis_* Turf 工具。'
-        + '结果必须如实带 scope：全表算（full_table）、筛选后全量上图（filtered）、抽样显示（sample_display）要分清，'
-        + '禁止把抽样展示说成全量几何。禁止对百万级图层默认执行全量 buffer 并宣称已全部上图。',
+      '8. 筛选与字段统计自动使用图层完整数据。空间筛选用 webgis_spatial_filter，空间聚合用 webgis_spatial_aggregate；如实转述返回的 scope、命中数和显示数。禁止把抽样展示说成全量几何。',
       '9. 面向用户的回复用日常 GIS 语言，不暴露内部技术名词：不要把 duckdb / maplibre / deck.gl / GeoArrow / spatial 扩展 / 内存表 / 引擎 / 图层内部 id（如 csv_1、duckdb_2、result_3、ds_0）/ 列名 / __rid 等术语讲给用户。'
         + '只告诉用户结果与动作：命中多少要素、落在哪个区域/距离范围、生成了什么内容的新图层；'
         + '工具返回或错误里出现这些技术词时，用用户能懂的话转述（如把「在 DuckDB 表 csv_1 上命中 1234 行」说成「在你这层数据里找到 1234 个」），不要原样照读技术字眼。',
-      '10. 先认清「大图层」：webgis_list_layers 里 **materialized=false** 的图层，地图上显示的只是抽样，'
-        + '真数据在内存表里，**totalCount 才是真实行数**（featureCount 只是当前显示了多少）。这类图层上：'
-        + '① 按属性筛选（等值/包含/大于…）**直接用 webgis_select_by_value 就行，它会自动改到全表上跑**，不必先换工具；'
-        + '② 要「全表有多少 / 均值多少」用 webgis_layer_stats（webgis_feature_summary 只统计图上抽样，值会偏）；'
-        + '③ 空间范围/围栏谓词用 webgis_spatial_filter，复杂查询用 webgis_sql_layer，等值筛选用 webgis_filter_layer；'
-        + '④ 会**改变要素本身**的操作（buffer/dissolve/clip/相交/重投影/写属性/加字段/属性连接/泰森多边形等）在这类图层上**会被拒绝**——'
-        + '先按①②筛/裁出要处理的子集，再对子集做这些操作。shp/geojson 大层与 csv 一样都有完整内存表与属性列。'
-        + '禁止把「地图上显示的抽样/可视部分」当成全量结论向用户汇报：说「一共有多少」用 totalCount，说「图上有多少」才用 featureCount。',
+      '10. materialized=false 表示地图仅显示抽样，totalCount 是完整图层行数。改变要素的操作（缓冲、叠加、重投影、编辑字段等）需先筛出可全量处理的子集；以工具返回的限制与结果为准。',
       '11. 语言跟随：回复（包括对用户可见的推理/思考过程）一律使用「用户输入所用的语言」：中文问→中文答；英文问→英文答；除非用户明确要求，不得擅自切换语言或中英混排。',
     ].join('\n'),
   }

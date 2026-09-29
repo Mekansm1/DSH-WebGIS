@@ -843,7 +843,7 @@ export function formatVerdict(spec: IndexSpec, v: IndexVerdict): string {
     const fix = allDirty
       ? '建议二选一：①换一个数值完整的字段再做本指数；'
         + '②先让用户决定怎么处置这些要素（webgis_filter_layer 按属性筛掉缺该字段的要素，'
-        + '或用 webgis_set_attribute 给它们补上确切的取值），把图层整理干净再做。'
+        + '或用 webgis_edit_field(action=set) 给它们补上确切的取值），把图层整理干净再做。'
         + '⚠ 不要用 0 去补 —— 空间统计的邻域关系会被填补值污染。'
       : spec.family === 'field'
         ? '建议：换一个数值属性完整的图层，或用 webgis_sql_layer 从现有表派生数值列（如密度=数量/面积）。'

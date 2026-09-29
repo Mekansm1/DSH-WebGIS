@@ -20,6 +20,33 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * 「等客户端回传」类超时的**成因诊断**片段。
+ *
+ * 这类超时原先只有一句"超时"，把三种完全不同的成因混成一句 —— 而它们的处置毫无共同点：
+ *   ① 客户端根本没挂载（从未拉过状态）→ 让用户去开 GIS 模式
+ *   ② 客户端掉线/关了界面（很久没拉）→ 让用户看界面是否还在
+ *   ③ 客户端在正常轮询却没完成这一步 → 问题在它自己，该去查浏览器控制台
+ * 现在按心跳（`WebgisState.lastClientPollAt`）如实说出来，用户和模型都不用猜。
+ */
+function clientLiveness(state: WebgisState, anonPolledAt?: number | null): string {
+  const t = state.lastClientPollAt
+  if (t == null) {
+    // 本会话桶从未被轮询。要区分两种成因，它们的处置完全不同：
+    //   ① 客户端根本没连上 → 让用户去开 GIS 模式
+    //   ② 客户端已连上、但**没关联到本会话**（落到了 anon 桶）→ 让用户先打开/选中一个对话
+    // ②正是 0.1.7 删掉 `SessionListState.current` 时的形态：客户端拿不到会话 id，只能轮询
+    // `?session=`（空值），于是 host 把它归入 anon 桶，与本会话桶永不相通。实测踩过。
+    if (anonPolledAt != null && Date.now() - anonPolledAt < 5000) {
+      return '（客户端已连接但未关联到本会话 → 会话信息尚未就绪；请先打开一个对话，再重试）'
+    }
+    return '（客户端从未拉取过地图状态 → 地图界面没挂载，或当前不在 GIS 模式）'
+  }
+  const ago = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (ago > 5) return `（客户端已 ${ago} 秒没拉取地图状态 → 界面可能已关闭或掉线）`
+  return `（客户端 ${ago} 秒前仍在正常轮询 → 请求已送达，是它没能完成这一步；请看浏览器控制台的报错）`
+}
+
+/**
  * 请求客户端捕获当前地图视图（图框中心）并等待回传：
  * 置 state.capture 让客户端轮询看到 → 等客户端 POST 带 captureSeq 的 pick。
  * 返回成功（pick）或失败原因；任何出口都会清掉 state.capture（幂等）。
@@ -29,6 +56,7 @@ export async function awaitCurrentViewCapture(
   state: WebgisState,
   seq: number,
   waitMs: number = CAPTURE_WAIT_MS,
+  anonPolledAt?: number | null,
 ): Promise<{ ok: true; pick: PickState } | { ok: false; message: string }> {
   state.capture = { seq }
   state.captureError = null
@@ -47,7 +75,7 @@ export async function awaitCurrentViewCapture(
     }
   }
   state.capture = null
-  return { ok: false, message: '当前视图截图超时（请确保地图在 GIS 模式可见，或点击地图后再询问）' }
+  return { ok: false, message: `当前视图截图超时（请确保地图在 GIS 模式可见，或点击地图后再询问）${clientLiveness(state, anonPolledAt)}` }
 }
 
 /** 出图结果等待上限（出图含用户弹窗确认/合成，放宽到 60s）。 */
@@ -68,6 +96,7 @@ export async function awaitBasemapExtraction(
   state: WebgisState,
   seq: number,
   waitMs: number = BASEMAP_WAIT_MS,
+  anonPolledAt?: number | null,
 ): Promise<{ ok: true; result: BasemapExportResult } | { ok: false; message: string }> {
   const deadline = Date.now() + waitMs
   while (Date.now() < deadline) {
@@ -86,7 +115,7 @@ export async function awaitBasemapExtraction(
     }
   }
   state.basemapRequest = null
-  return { ok: false, message: '等待底图要素提取超时（请确认地图在 GIS 模式可见，且当前底图是矢量底图）' }
+  return { ok: false, message: `等待底图要素提取超时（请确认地图在 GIS 模式可见，且当前底图是矢量底图）${clientLiveness(state, anonPolledAt)}` }
 }
 
 export type ExportWaitResult =
@@ -107,6 +136,7 @@ export async function awaitExportCompletion(
   state: WebgisState,
   seq: number,
   waitMs: number = EXPORT_WAIT_MS,
+  anonPolledAt?: number | null,
 ): Promise<ExportWaitResult> {
   const deadline = Date.now() + waitMs
   while (Date.now() < deadline) {
@@ -125,5 +155,5 @@ export async function awaitExportCompletion(
     }
   }
   state.exportRequest = null
-  return { ok: false, message: '等待出图超时（用户未在出图弹窗确认）。不要反复重试，先问用户是否要继续出图。' }
+  return { ok: false, message: `等待出图超时（用户未在出图弹窗确认）。不要反复重试，先问用户是否要继续出图。${clientLiveness(state, anonPolledAt)}` }
 }

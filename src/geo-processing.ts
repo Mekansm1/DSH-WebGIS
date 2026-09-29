@@ -340,9 +340,13 @@ export function requireMaterialized(layer: GisLayer, opName: string): string | n
 
 /** 守卫：字段存在于图层任一要素的属性里。返回错误消息或 null。 */
 export function requireField(layer: GisLayer, field: string): string | null {
-  const has = layer.geojson.features.some((f) => f?.properties != null && field in f.properties)
-  if (!has) return `图层 ${layer.id} 没有字段 ${field}（用 webgis_layer_info 查看字段）`
-  return null
+  const features = layer.geojson.features
+  const has = features.some((f) => f?.properties != null && field in f.properties)
+  if (has) return null
+  // 0 要素时字段无从谈起（geojson 里没有任何一行可看）。此时报「图层空」才是真因：
+  // 报「没有字段 X」会让模型转告用户"你的数据里没有这一列"，而其实有——只是上一层筛空了。
+  if (features.length === 0) return `图层 ${layer.id} 没有要素（0 行），无法按字段 ${field} 计算（请先确认筛选条件是否过窄）`
+  return `图层 ${layer.id} 没有字段 ${field}（用 webgis_layer_info 查看字段）`
 }
 
 function unionFC(fcIn: FeatureCollection): Feature<Polygon | MultiPolygon> | null {

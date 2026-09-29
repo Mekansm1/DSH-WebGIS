@@ -9,7 +9,7 @@
  *  - `./duckdb/ingestion.js`        CSV/矢量/大 GeoJSON → DuckDB 内存表 + 上图抽样
  *  - `./duckdb/engine.js`           DuckDbEngine（连接/建表/查询/Arrow IPC/抽样）
  *  - `./duckdb/tools-shared.js`     工具的会话上下文（sess/pushResult）与公共件
- *  - `./duckdb/tools/*.ts`          各 webgis_* 工具的注册（load-csv / filter / sql / spatial-*）
+ *  - `./duckdb/tools/*.ts`          各 webgis_* 工具的注册（load-dataset / filter / sql / spatial-*）
  *
  * 这里只做「建 engine → 建会话解析器 → 调用各工具注册」与对外再导出，
  * 保证既有 `import ... from './duckdb-tools.js'`（index.ts / routes-layers.ts / 单测）无需改动。
@@ -19,7 +19,7 @@ import { getDuckDb } from './duckdb.js'
 import {
   makeSessionResolver, type DuckDbToolsOptions, type DuckToolDeps, type DuckToolsState,
 } from './duckdb/tools-shared.js'
-import { registerLoadCsvTool } from './duckdb/tools/load-csv.js'
+import { registerLoadDatasetTool } from './duckdb/tools/load-dataset.js'
 import { registerLayerFilterTools } from './duckdb/tools/filter.js'
 import { registerSqlTools } from './duckdb/tools/sql.js'
 import { registerSpatialFilterTool } from './duckdb/tools/spatial-filter.js'
@@ -36,7 +36,7 @@ export { ingestBigGeojson, loadCsvSourceData, loadVectorSourceData, VECTOR_SOURC
 export type { CsvLayerData, IngestBigResult, VectorLayerData, VectorSourceDataOpts } from './duckdb/ingestion.js'
 
 /**
- * 注册 DuckDB 工具族（webgis_load_csv / filter_layer / layer_stats / sql_layer /
+ * 注册 DuckDB 工具族（webgis_load_dataset / filter_layer / layer_stats / sql_layer /
  * export_layer / spatial_filter / spatial_aggregate）。
  */
 export function registerDuckDbTools(
@@ -47,7 +47,7 @@ export function registerDuckDbTools(
   const engine = opts.engine ?? getDuckDb(opts.duckdb)
   const sess = makeSessionResolver(engine, stateFor)
   const deps: DuckToolDeps = { ctx, engine, sess }
-  registerLoadCsvTool(ctx, deps)
+  registerLoadDatasetTool(ctx, deps)
   registerLayerFilterTools(ctx, deps)
   registerSqlTools(ctx, deps)
   registerSpatialFilterTool(ctx, deps)

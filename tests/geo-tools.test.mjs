@@ -85,17 +85,17 @@ test('registerGeoTools：经 inject 注册全局工具纪律系统提示段（#6
   assert.ok(defs.length >= 35)
 })
 
-test('全部 44 个工具都注册了（21 构造/OD/样式 + 6 矢量 + 5 统计 + 4 指数 + 1 底图 + 4 展示方式/改色/专题 + 3 属性编辑）', () => {
+test('全部 41 个 geo 工具注册正确（颜色工具已并入样式工具）', () => {
   const { defs } = setup()
   const names = defs.map((d) => d.name).sort()
   const expected = [
-    'webgis_add_column', 'webgis_add_sequence', 'webgis_attribute_join', 'webgis_average_nearest_neighbor', 'webgis_bounding_box',
+    'webgis_attribute_join', 'webgis_average_nearest_neighbor', 'webgis_bounding_box',
     'webgis_buffer', 'webgis_centroids', 'webgis_clear_layers', 'webgis_clip',
     'webgis_convex_hull', 'webgis_difference', 'webgis_dissolve', 'webgis_explode', 'webgis_export_basemap',
     'webgis_feature_summary', 'webgis_getis_ord', 'webgis_gini', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
     'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
     'webgis_reproject', 'webgis_select_by_location', 'webgis_select_by_value',
-    'webgis_set_attribute', 'webgis_set_heatmap_mode', 'webgis_set_layer_color', 'webgis_set_layer_style', 'webgis_set_layer_thematic',
+    'webgis_edit_field', 'webgis_set_heatmap_mode', 'webgis_set_layer_style', 'webgis_set_layer_thematic',
     'webgis_set_layer_visibility',
     'webgis_set_render_mode',
     'webgis_shannon', 'webgis_simplify', 'webgis_smooth',
@@ -585,6 +585,26 @@ test('set_layer_style: 点位大小/描边/填充色落字段，不 bump rev；�
   assert.equal(badColor.ok, false)
 })
 
+test('set_layer_style: 空参数和非法混合参数不改状态；单色兼容颜色名且清除专题', async () => {
+  const pts = makeResultLayer({ id: 'dataset', name: '点', geojson: featureCollection([point([0, 0])]), source: 'dataset' })
+  const { run } = setup([pts])
+  pts.thematic = { field: 'value', method: 'unique', stops: [] }
+  const before = structuredClone(pts)
+  for (const patch of [{}, { color: '' }, { fillColor: '' }, { color: 'red', radius: 0 }, { color: 'red', fillColor: 'invalid' }]) {
+    const out = await run('webgis_set_layer_style', { layer: 'dataset', ...patch })
+    assert.equal(out.ok, false)
+    assert.deepEqual(pts, before)
+  }
+  await assert.rejects(() => run('webgis_set_layer_style', { layer: 'dataset', radius: null }), /must be a number/)
+  assert.deepEqual(pts, before)
+  const out = await run('webgis_set_layer_style', { layer: 'dataset', color: 'red', strokeWidth: 0 })
+  assert.equal(out.ok, true)
+  assert.equal(pts.color, '#ef4444')
+  assert.equal(pts.pointStrokeWidth, 0)
+  assert.equal(pts.thematic, undefined)
+  assert.equal(pts.rev, before.rev)
+})
+
 test('set_attribute / add_sequence: 属性编辑 bump rev，客户端重拉；筛选只改命中要素', async () => {
   const pts = makeResultLayer({
     id: 'dataset', name: '点',
@@ -597,19 +617,19 @@ test('set_attribute / add_sequence: 属性编辑 bump rev，客户端重拉；�
   const { state, run } = setup([pts])
   const before = state.layers[0].rev
   // add_sequence：0..n-1
-  const seq = await run('webgis_add_sequence', { layer: 'dataset', field: 'seq' })
+  const seq = await run('webgis_edit_field', { action: 'sequence', layer: 'dataset', field: 'seq' })
   assert.equal(seq.ok, true)
   assert.equal(seq.featureCount, 2)
   assert.equal(state.layers[0].rev, before + 1, '属性编辑应 bump rev')
   assert.deepEqual(state.layers[0].geojson.features.map((f) => f.properties.seq), [0, 1])
   // add_sequence start=1：1 基递增（count 从 1 开始）
-  const seq1 = await run('webgis_add_sequence', { layer: 'dataset', field: 'count', start: 1 })
+  const seq1 = await run('webgis_edit_field', { action: 'sequence', layer: 'dataset', field: 'count', start: 1 })
   assert.equal(seq1.ok, true)
   assert.match(seq1.message, /1~2/)
   assert.deepEqual(state.layers[0].geojson.features.map((f) => f.properties.count), [1, 2])
 })
 
-test('webgis_add_column: 新增空字段（值 null），已存在的字段拒绝', async () => {
+test('webgis_edit_field(action=add): 新增空字段（值 null），已存在的字段拒绝', async () => {
   const pts = makeResultLayer({
     id: 'dataset', name: '点',
     geojson: featureCollection([
@@ -620,32 +640,32 @@ test('webgis_add_column: 新增空字段（值 null），已存在的字段拒�
   })
   const { state, run } = setup([pts])
   const before = state.layers[0].rev
-  const out = await run('webgis_add_column', { layer: 'dataset', field: 'test' })
+  const out = await run('webgis_edit_field', { action: 'add', layer: 'dataset', field: 'test' })
   assert.equal(out.ok, true)
   assert.equal(out.featureCount, 2)
   assert.equal(state.layers[0].rev, before + 1, '新增列应 bump rev')
   assert.deepEqual(state.layers[0].geojson.features.map((f) => f.properties.test), [null, null])
   assert.equal(state.layers[0].geojson.features[0].properties.label, 'a', '原有字段不受影响')
   // 字段已存在 → ok:false
-  const again = await run('webgis_add_column', { layer: 'dataset', field: 'test' })
+  const again = await run('webgis_edit_field', { action: 'add', layer: 'dataset', field: 'test' })
   assert.equal(again.ok, false)
   assert.match(again.message, /已存在/)
   // set_attribute 全部要素
-  const all = await run('webgis_set_attribute', { layer: 'dataset', field: 'kind', value: 'x' })
+  const all = await run('webgis_edit_field', { action: 'set', layer: 'dataset', field: 'kind', value: 'x' })
   assert.equal(all.ok, true)
   assert.equal(all.featureCount, 2)
   assert.deepEqual(state.layers[0].geojson.features.map((f) => f.properties.kind), ['x', 'x'])
   // set_attribute 带筛选：只改 label=a 的
-  const filt = await run('webgis_set_attribute', { layer: 'dataset', field: 'tag', value: 1, filterField: 'label', filterOperator: 'eq', filterValue: 'a' })
+  const filt = await run('webgis_edit_field', { action: 'set', layer: 'dataset', field: 'tag', value: 1, filterField: 'label', filterOperator: 'eq', filterValue: 'a' })
   assert.equal(filt.ok, true)
   assert.equal(filt.featureCount, 1)
   assert.deepEqual(state.layers[0].geojson.features.map((f) => f.properties.tag), [1, undefined])
   // 筛选不命中 → ok:false
-  const miss = await run('webgis_set_attribute', { layer: 'dataset', field: 'tag', value: 1, filterField: 'label', filterOperator: 'eq', filterValue: 'nope' })
+  const miss = await run('webgis_edit_field', { action: 'set', layer: 'dataset', field: 'tag', value: 1, filterField: 'label', filterOperator: 'eq', filterValue: 'nope' })
   assert.equal(miss.ok, false)
   assert.match(miss.message, /没有要素被修改/)
   // 空字段名（过 schema 但为空）→ handler 守卫 ok:false
-  const emptyField = await run('webgis_set_attribute', { layer: 'dataset', field: '', value: 1 })
+  const emptyField = await run('webgis_edit_field', { action: 'set', layer: 'dataset', field: '', value: 1 })
   assert.equal(emptyField.ok, false)
 })
 

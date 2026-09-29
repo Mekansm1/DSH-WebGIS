@@ -1,3 +1,5 @@
+import { filterFullLocation } from './duckdb/location-filter.js'
+import { summarizeFullField } from './duckdb/field-summary.js'
 /**
  * dsh-webgis host 侧：注册工具与 HTTP 路由。
  * 维护一个进程内地图状态（数据集 + 导航意图），客户端轮询 /webgis/state 消费。
@@ -25,15 +27,7 @@ import type { PostgisConfig } from './postgis.js'
 import type { DbManager } from './db-manager.js'
 import { createDbManager } from './db-manager.js'
 import { registerDbTools } from './db-tools.js'
-import {
-  ingestBigGeojson,
-  loadCsvSourceData,
-  loadVectorSourceData,
-  registerDuckDbTools,
-  VECTOR_SOURCE_EXTS,
-  type IngestBigResult,
-  type VectorLayerData,
-} from './duckdb-tools.js'
+import { registerDuckDbTools, type IngestBigResult } from './duckdb-tools.js'
 import { getDuckDb, type DuckDbOptions } from './duckdb.js'
 import { createFullTableAttrFilter } from './duckdb/attr-filter.js'
 import { isWebgisRouteBlocked, loadPluginEnabled } from './enabled.js'
@@ -53,7 +47,7 @@ import {
   digestLine, layerDigest, modelSupportsImage, screenshotMeta,
   type LayerDigest, type ScreenshotMeta,
 } from './screenshot-utils.js'
-import { loadDataset, resolveSourceLocal } from './dataset-load.js'
+import { loadDataset } from './dataset-load.js'
 export { parseShapefileBuffer, loadShapefile, loadDataset, loadCsv, loadCsvText } from './dataset-load.js'
 import type { RouteApi, RouteDef } from './route-shared.js'
 import { route } from './route-shared.js'
@@ -155,7 +149,7 @@ export function apply(ctx: Context, config: Config): void {
   let defaultDataset: DatasetInfo | null = null
   const states = new SessionStateStore(() => {
     const st: WebgisState = {
-      dataset: null, navigate: null, pick: null, capture: null, captureError: null,
+      dataset: null, navigate: null, pick: null, capture: null, captureError: null, lastClientPollAt: null,
       exportRequest: null, exportImage: null, exportError: null,
       basemapRequest: null, basemapResult: null, basemapError: null,
       layers: [],
@@ -166,6 +160,12 @@ export function apply(ctx: Context, config: Config): void {
   })
   /** 按会话 id 解析该会话的地图状态（工具执行 / HTTP 路由共用）。 */
   const stateFor = (sessionId: string | undefined): WebgisState => states.get(sessionId)
+  /**
+   * anon 桶的客户端心跳时刻。给「等客户端回传」的超时消息用：本会话桶从未被轮询、但 anon 桶有
+   * 心跳 → 说明客户端**已连上、只是没关联到本会话**（会话 id 取不到时的典型形态），
+   * 与"客户端根本没挂载"是两种完全不同的成因（见 wait-utils 的 clientLiveness）。
+   */
+  const anonPolledAt = (): number | null => states.get(undefined).lastClientPollAt
 
   // ---- SSE 状态推送（方案：远期规划「1s 轮询 → 推送」）----
   // 不为几十个写点逐桩埋通知：对「有订阅会话」每 250ms 比对一次状态摘要指纹，变了才推 `sync` 事件，
@@ -532,7 +532,7 @@ export function apply(ctx: Context, config: Config): void {
           extent: args.extent === 'all' ? 'all' : 'view',
         },
       }
-      const waited = await awaitExportCompletion(st, seq)
+      const waited = await awaitExportCompletion(st, seq, undefined, anonPolledAt())
       if (!waited.ok) return { ok: false, message: waited.message }
       const img = waited.image
       const supports = await modelSupportsImage(ctx, exec)
@@ -583,168 +583,6 @@ export function apply(ctx: Context, config: Config): void {
         attachImage: supports,
         image: { ref: img.ref } as unknown as JsonValue,
         message: '最近一次出图。',
-      }
-    },
-  }))
-
-  // ---- 工具：加载数据集 ----
-  ctx.tools.register(defineTool({
-    name: 'webgis_load_dataset',
-    description:
-      '把数据文件加载为一个新图层显示。'
-      + '⚠ 用户要加载的是 **CSV** 时请改用 webgis_load_csv（分析型入口，保留可继续筛选的内存表）；本工具主路径是 GeoJSON / shapefile。'
-      + '支持：GeoJSON（.geojson/.json）、shapefile 的 .zip 包'
-      + '（推荐，内含 .shp/.dbf/.prj 一组）或单个 .shp 文件、以及 CSV（自动识别经纬度/WKT 几何列，大文件经 DuckDB 抽样防内存爆）。'
-      + '本地矢量文件 .shp/.gdb/.gpkg/.kml/.tab/.mif 走 DuckDB spatial 的 GDAL 直读（ST_Read）直接灌表：'
-      + '超大 .shp 不再先经 shpjs 把全量要素物化成 JS GeoJSON，大文件留内存表抽样上图、可继续筛选。'
-      + '.shp/.tab 需要同目录的 .dbf/.shx/.prj 等配套文件（GDAL 整份读取）；.gdb 是文件夹需指到目录本身。'
-      + '多图层源（GDB/GPKG）可用 layer 参数指定 GDAL 图层名，缺省读第一层；坐标系默认按 WGS84，投影数据可传 sourceCrs'
-      + '（如 EPSG:3857，自动转 4326 上图）。.shp 直读失败（如缺配套/离线无 spatial）会自动回退旧 shpjs 路径。'
-      + '——后端会自动把这些格式转成 GeoJSON/Arrow，无需自己转换。url 必须用绝对路径'
-      + '（如 D:\\xxx\\yyy.csv；相对路径以插件包目录为基准，通常找不到用户文件）或 http(s) 地址。'
-      + 'http(s) 地址需为公网可达——内网/回环/保留 IP 会被安全策略拒绝（防 SSRF）。'
-      + '当用户提到 shapefile / .shp / .zip 数据包 / CSV / 矢量数据文件（.gdb/.gpkg/.kml/.tab/.mif）并希望在地图上查看时，'
-      + '直接调用本工具并传入文件绝对路径或 URL，不要自己用脚本/库去转换、去 BOM、改文件。'
-      + '注意：**每次调用都新增一个独立图层（id ds_<n>）叠加到地图上**，不会清掉地图上已有的图层/数据集；'
-      + '>10 万的大文件走 DuckDB arrow + 缩放分级。多次加载希望只保留最后一个时，先 webgis_remove_layer 移除旧图层。'
-      + '加载成功后地图会缩放到新图层范围。',
-    parameters: {
-      url: {
-        type: 'string', required: true,
-        description: '数据集绝对路径或 http(s) URL（支持 GeoJSON / shapefile 的 .zip/.shp / CSV / 矢量 .shp/.gdb/.gpkg/.kml/.tab/.mif；相对路径会解析到插件包目录，可能找不到）',
-      },
-      layer: {
-        type: 'string',
-        description: '多图层矢量源（GDB/GPKG）的 GDAL 图层名；缺省读第一层（仅本地矢量 DuckDB 直读路径使用）',
-      },
-      sourceCrs: {
-        type: 'string',
-        description: '矢量源坐标系（如 EPSG:3857，自动转 4326 上图；缺省按 WGS84 解释；仅本地矢量 DuckDB 直读路径使用）',
-      },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          name: { type: 'string' },
-          featureCount: { type: 'integer' },
-          layerId: { type: 'string' },
-          message: { type: 'string' },
-        },
-      },
-      render: (_args, value) => text(JSON.stringify(value)),
-    },
-    async execute(args, exec) {
-      try {
-        // 加载策略分三类（都只针对「本地文件」；HTTP/远程与其它走原有 loadDataset 逻辑避免回退）：
-        // 1) 本地 CSV → DuckDB read_csv 建表抽样（几何/经纬度列自动识别），防 JS 整表物化 OOM；
-        // 2) 本地矢量 .shp/.gdb/.gpkg/.kml/.tab/.mif → DuckDB spatial ST_Read/GDAL 直读灌表（超大 .shp 不再经 shpjs 全量物化）；
-        //    .shp 新路径失败（缺配套/离线无 spatial）回退原 shpjs + ingestBigGeojson；
-        // 3) 其余（shp/zip/geojson/csv URL）仍走 loadDataset 解析 → 灌表/物化判定。
-        const st = stateFor(exec.agent?.id)
-        // 数据集加载后地图会缩放到其范围：旧点击/捕获记录失效，避免下次查询返回旧位置。
-        st.pick = null
-        const cleanSource = String(args.url).split(/[?#]/)[0] ?? ''
-        const isLocal = !/^https?:\/\//i.test(String(args.url))
-        const isLocalCsv = isLocal && /\.csv$/i.test(cleanSource)
-        const ext = cleanSource.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? ''
-        const isLocalVector = isLocal && VECTOR_SOURCE_EXTS.includes(ext)
-        const layerArg = typeof args.layer === 'string' && args.layer ? args.layer : undefined
-        const sourceCrsArg = typeof args.sourceCrs === 'string' && args.sourceCrs ? args.sourceCrs : undefined
-        type BigLoad = Omit<IngestBigResult, 'duckGeom'> & { duckGeom?: IngestBigResult['duckGeom']; duckCoords?: { lon: string; lat: string } }
-        let ds: { name: string; geojson: GeoJson; featureCount: number }
-        let big: BigLoad | null = null
-        if (isLocalCsv) {
-          const csv = await loadCsvSourceData(getDuckDb(), resolveSourceLocal(String(args.url)))
-          const baseName = cleanSource.split(/[\\/]/).pop() ?? 'csv'
-          ds = { name: baseName, geojson: csv.geojson as unknown as GeoJson, featureCount: csv.geojson.features.length }
-          if (!csv.small) {
-            big = {
-              duckTable: csv.duckTable!,
-              totalCount: csv.totalCount,
-              geojson: csv.geojson,
-              duckCoords: csv.duckCoords,
-              duckGeom: csv.duckGeom,
-              families: csv.families,
-              fullBbox: csv.fullBbox,
-            }
-          }
-        } else if (isLocalVector) {
-          try {
-            const vec: VectorLayerData = await loadVectorSourceData(getDuckDb(), resolveSourceLocal(cleanSource), {
-              layer: layerArg,
-              sourceCrs: sourceCrsArg,
-            })
-            const baseName = cleanSource.split(/[\\/]/).pop() ?? 'vector'
-            ds = { name: baseName, geojson: vec.geojson as unknown as GeoJson, featureCount: vec.geojson.features.length }
-            if (!vec.small) {
-              big = {
-                duckTable: vec.duckTable!,
-                totalCount: vec.totalCount,
-                geojson: vec.geojson,
-                ...(vec.duckGeom ? { duckGeom: vec.duckGeom } : {}),
-                families: vec.families,
-                fullBbox: vec.fullBbox,
-              }
-            }
-          } catch (err) {
-            if (ext === 'shp') {
-              // 新路径失败（如缺 .dbf/.shx/.prj 兄弟文件、spatial 离线装不上）→ 回退原 shpjs 解析 → 灌表/物化判定，避免破坏现状。
-              ds = await loadDataset(args.url)
-              try {
-                big = await ingestBigGeojson(ds.geojson as unknown as FeatureCollection)
-              } catch {
-                big = null // 灌表失败（如 spatial 不可用）→ 保持纯 geojson
-              }
-            } else {
-              throw err
-            }
-          }
-        } else {
-          ds = await loadDataset(args.url)
-          try {
-            big = await ingestBigGeojson(ds.geojson as unknown as FeatureCollection)
-          } catch {
-            big = null // 灌表失败（如 spatial 不可用）→ 保持纯 geojson
-          }
-        }
-        // 叠加语义：新数据集作为独立图层追加（旧图层/旧数据集保留，各自可显隐/移除）。
-        const layer = makeResultLayer({
-          id: `ds_${++seqs.datasetSeq}`,
-          name: ds.name,
-          geojson: big?.geojson ?? ds.geojson,
-          source: 'dataset',
-          ...(big
-            ? {
-                duckTable: big.duckTable,
-                totalCount: big.totalCount,
-                ...(big.duckGeom ? { duckGeom: big.duckGeom } : {}),
-                ...(big.duckCoords ? { duckCoords: big.duckCoords } : {}),
-                ...(big.fullBbox ? { fullBbox: big.fullBbox } : {}),
-                ...(big.families && big.families.length > 1 ? { families: big.families } : {}),
-              }
-            : {}),
-        })
-        st.layers = [...st.layers, layer]
-        const bigNote = big
-          ? (big.families && big.families.length > 1
-            ? `（${big.totalCount} 行，多几何族走抽样渲染）`
-            : `（${big.totalCount} 行走 DuckDB arrow + zoom 分级）`)
-          : ''
-        return {
-          ok: true,
-          name: ds.name,
-          featureCount: ds.featureCount,
-          layerId: layer.id,
-          message: `数据集 ${ds.name} 已加载为图层 ${layer.id}${bigNote}；已有图层保留，可叠加`,
-        }
-      } catch (err) {
-        return {
-          ok: false,
-          message: `数据集加载失败: ${err instanceof Error ? err.message : String(err)}`,
-        }
       }
     },
   }))
@@ -892,7 +730,7 @@ export function apply(ctx: Context, config: Config): void {
       let fromCapture = false
       let pick = st.pick
       if (!pick || args.refresh === true) {
-        const result = await awaitCurrentViewCapture(st, ++seqs.captureSeq)
+        const result = await awaitCurrentViewCapture(st, ++seqs.captureSeq, undefined, anonPolledAt())
         if (!result.ok) return { ok: false, message: result.message }
         pick = result.pick
         fromCapture = true
@@ -963,13 +801,15 @@ export function apply(ctx: Context, config: Config): void {
       st.basemapResult = null
       st.basemapError = null
       st.basemapRequest = { seq, params }
-      return awaitBasemapExtraction(st, seq)
+      return awaitBasemapExtraction(st, seq, undefined, anonPolledAt())
     },
   }, {
     // 大图层属性筛选下推：turf 域拿不到 DuckDB 引擎，由 host 在这里接线。
     // 图层有内存表时，select_by_value 内部改道到这里跑**全表**（否则只在上图抽样 5 万行上筛，静默算错）。
     // 惰性取值：注册工具时引擎可能还没建，传值会在插件启动期就把 DuckDB 拉起来。
     attrFilterFullTable: createFullTableAttrFilter(getDuckDb),
+    filterFullLocation: (layer, relation, overlay, bbox) => filterFullLocation(getDuckDb(), layer, relation, overlay, bbox),
+    summarizeFullField: (layer, field, stat) => summarizeFullField(getDuckDb(), layer, field, stat),
     runGeoJob: (job, timeoutMs, opts) => geoJobs.run(job, timeoutMs, opts),
   })
 

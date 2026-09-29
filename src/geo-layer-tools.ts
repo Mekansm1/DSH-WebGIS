@@ -1,7 +1,6 @@
 /**
  * dsh-webgis GIS 工具层 · 图层管理域：list_layers / remove_layer / clear_layers /
- * set_layer_visibility / set_layer_color / set_layer_style / set_attribute / add_sequence /
- * add_column / od_matrix / set_render_mode / set_heatmap_mode。注册逻辑与工具行为与拆分前
+ * set_layer_visibility / set_layer_style / edit_field / od_matrix / set_render_mode / set_heatmap_mode。注册逻辑与工具行为与拆分前
  * geo-tools.ts 完全一致，仅把 sess/schema/文案/applyMode/applyStyle/hooks 等共享件来源
  * 从大闭包改为 runtime 参数 rt。
  */
@@ -161,7 +160,7 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       + 'ramp 选色带：数值常用 blues/greens/oranges/reds/purples/viridis（顺序型）、spectral（分歧型，有中心意义时用）；'
       + '分类用 set2（定性型）。classes 默认 5 级（2~12）。'
       + '⚠ 缺值**不会**被当成 0 混进某一级 —— 它们单独用中性灰显示，并在结果里报出个数。'
-      + '⚠ 这是纯展示变更：不改数据、不影响统计结果。想改回单色用 webgis_set_layer_color。',
+      + '⚠ 这是纯展示变更：不改数据、不影响统计结果。想改回单色用 webgis_set_layer_style 的 color 参数。',
     parameters: {
       layer: LAYER_PARAM,
       field: { type: 'string', required: true, description: '用于上色的属性字段（数值列做分箱，文字列按类别）' },
@@ -214,51 +213,14 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
         thematic: res.spec as unknown as JsonValue,
         legend: res.labels,
         message: `${formatLegend(res.spec, res.labels)}${sampled}${noData}`
-          + `\n请把这份图例转述给用户（颜色与区间要对应上）。改回单色用 webgis_set_layer_color。`,
-      })
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'webgis_set_layer_color',
-    description: COMMON + '修改指定图层的显示颜色（仅改变显示、不改动图层数据，也不重新计算）。接受十六进制（#f73 / f97316）或颜色名（red / orange / 橙红 / 蓝 / 绿…）。适用于任何图层。更完整的样式（点位大小/外轮廓/填充色）请用 webgis_set_layer_style。',
-    parameters: {
-      layer: LAYER_PARAM,
-      color: { type: 'string', required: true, description: '目标颜色：十六进制 #rrggbb / #rgb（可省略 #）或颜色名（red/orange/blue/绿/蓝…）' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          layerId: { type: 'string' },
-          color: { type: 'string' },
-          message: { type: 'string' },
-        },
-      },
-      render: (_a, v) => text(JSON.stringify(v)),
-    },
-    isConcurrencySafe: () => false,
-    execute(args, exec) {
-      const { resolve } = sess(exec)
-      const layer = resolve(args.layer)
-      if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const err = applyStyle(layer, { color: String(args.color) })
-      if (err) return Promise.resolve({ ok: false, message: err })
-      // 原地改、不 bump rev：纯展示变更，客户端按 color 字段重渲染、不重拉数据。
-      return Promise.resolve({
-        ok: true,
-        layerId: layer.id,
-        color: layer.color,
-        message: `图层 ${layer.id} 颜色已改为 ${layer.color}`,
+          + `\n请把这份图例转述给用户（颜色与区间要对应上）。改回单色用 webgis_set_layer_style 的 color 参数。`,
       })
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'webgis_set_layer_style',
-    description: COMMON + '修改图层渲染样式（仅改变显示、不改动图层数据，也不重新计算）：color=整体颜色（填充+描边默认值）、radius=点位大小（像素，点图层 circle-radius）、strokeWidth=外轮廓粗细（像素，点描边与面边界线宽）、fillColor=内填充颜色（覆盖 color 用于填充：点=圆点填充、面=多边形填充）。字段缺省保持原值。适用于任何图层。',
+    description: COMMON + '修改图层渲染样式（仅改变显示、不改动图层数据，也不重新计算）：color=整体颜色（填充+描边默认值）、radius=点位大小（像素，点图层 circle-radius）、strokeWidth=外轮廓粗细（像素，点描边与面边界线宽）、fillColor=内填充颜色（覆盖 color 用于填充：点=圆点填充、面=多边形填充）。至少提供一个样式字段，缺省字段保持原值。设置 color/fillColor 会关闭专题配色。适用于任何图层。',
     parameters: {
       layer: LAYER_PARAM,
       color: { type: 'string', description: '整体颜色（十六进制 #rrggbb/#rgb 或颜色名），缺省保持原值' },
@@ -283,11 +245,24 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       const { resolve } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
+      if ([args.color, args.radius, args.strokeWidth, args.fillColor].every(v => v === undefined)) {
+        return Promise.resolve({ ok: false, message: '至少提供一个样式字段：color、radius、strokeWidth 或 fillColor' })
+      }
+      for (const key of ['color', 'fillColor'] as const) {
+        if (args[key] !== undefined && typeof args[key] !== 'string') {
+          return Promise.resolve({ ok: false, message: `${key} 必须是颜色字符串` })
+        }
+      }
+      for (const key of ['radius', 'strokeWidth'] as const) {
+        if (args[key] !== undefined && typeof args[key] !== 'number') {
+          return Promise.resolve({ ok: false, message: `${key} 必须是数字` })
+        }
+      }
       const err = applyStyle(layer, {
-        ...(typeof args.color === 'string' && args.color ? { color: args.color } : {}),
+        ...(typeof args.color === 'string' ? { color: args.color } : {}),
         ...(typeof args.radius === 'number' ? { pointRadius: args.radius } : {}),
         ...(typeof args.strokeWidth === 'number' ? { pointStrokeWidth: args.strokeWidth } : {}),
-        ...(typeof args.fillColor === 'string' && args.fillColor ? { fillColor: args.fillColor } : {}),
+        ...(typeof args.fillColor === 'string' ? { fillColor: args.fillColor } : {}),
       })
       if (err) return Promise.resolve({ ok: false, message: err })
       const bits = [`color=${layer.color}`]
@@ -299,132 +274,56 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'webgis_set_attribute',
-    description: COMMON + '编辑图层属性：给要素写入字段（field=value），可选按 filterField/filterOperator/filterValue 只改命中的要素（算子同 webgis_select_by_value：eq/neq/gt/gte/lt/lte/contains/starts_with/ends_with/in/is_null/not_null）。原地改并 bump rev，客户端自动重拉。典型用法：给临时图层打类别/标注。注意：本工具只写同一个常量值——如需递增编号/逐要素不同值，用 webgis_add_sequence（支持 start 起点，如 1 基递增）。',
+    name: 'webgis_edit_field',
+    description: '编辑图层字段：action=set 写常量（可按属性条件筛选）；add 新增空列，已有列不覆盖；sequence 按要素顺序写递增序号。'
+      + '原地修改，自动刷新。未全量物化的图层需先筛出可处理子集。',
     parameters: {
       layer: LAYER_PARAM,
-      field: { type: 'string', required: true, description: '要写入的字段名' },
-      value: { type: 'json', required: true, description: '写入值（数字/字符串/布尔）' },
-      filterField: { type: 'string', description: '筛选字段（不传则改全部要素）' },
+      action: { type: 'string', required: true, enum: ['set', 'add', 'sequence'], description: 'set=写常量；add=新增空列；sequence=递增编号' },
+      field: { type: 'string', description: '字段名；set/add 必填，sequence 缺省 seq' },
+      value: { type: 'json', description: 'set 必填，数字/字符串/布尔' },
+      start: { type: 'number', description: 'sequence 的整数起点，缺省 0' },
+      filterField: { type: 'string', description: 'set 可选筛选字段' },
       filterOperator: { type: 'string', enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'starts_with', 'ends_with', 'in', 'is_null', 'not_null'], description: '筛选算子，缺省 eq' },
-      filterValue: { type: 'string', description: '筛选值（is_null/not_null 忽略）' },
+      filterValue: { type: 'string', description: '筛选值；is_null/not_null 不需要' },
     },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          layerId: { type: 'string' },
-          featureCount: { type: 'integer' },
-          message: { type: 'string' },
-        },
-      },
-      render: (_a, v) => text(JSON.stringify(v)),
-    },
+    output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     isConcurrencySafe: () => false,
-    execute(args, exec) {
+    async execute(args, exec) {
       const { resolve } = sess(exec)
       const layer = resolve(args.layer)
-      if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const field = typeof args.field === 'string' && args.field ? args.field : ''
-      if (!field) return Promise.resolve({ ok: false, message: 'field 不能为空' })
-      // 大图层的 geojson 只是上图抽样：只写进抽样那几行，Arrow 渲染读的却是原表 → 新值根本看不见。
-      const merr = requireMaterialized(layer, '写属性')
-      if (merr) return Promise.resolve({ ok: false, message: merr })
-      const value = args.value
-      if (typeof value !== 'number' && typeof value !== 'string' && typeof value !== 'boolean') {
-        return Promise.resolve({ ok: false, message: 'value 必须是数字/字符串/布尔' })
+      if (typeof layer === 'string') return { ok: false, message: layer }
+      const merr = requireMaterialized(layer, '编辑字段')
+      if (merr) return { ok: false, message: merr }
+      const field = args.field?.trim() || (args.action === 'sequence' ? 'seq' : '')
+      if (!field) return { ok: false, message: 'set/add 必须提供非空 field' }
+      if (['__proto__', 'prototype', 'constructor'].includes(field)) return { ok: false, message: '不允许使用该字段名' }
+      if (args.action !== 'set' && [args.value, args.filterField, args.filterOperator, args.filterValue].some(v => v !== undefined)) {
+        return { ok: false, message: 'value/filterField/filterOperator/filterValue 仅适用于 set' }
       }
-      const filter = typeof args.filterField === 'string' && args.filterField
-        ? { field: args.filterField, operator: (args.filterOperator as SelectOperator) ?? 'eq', value: typeof args.filterValue === 'string' ? args.filterValue : undefined }
-        : undefined
-      const count = opSetAttribute(layer, field, value, filter)
-      if (count === 0) {
-        return Promise.resolve({ ok: false, message: '没有要素被修改（检查 filterField/filterOperator/filterValue 是否匹配）' })
+      if (args.action !== 'sequence' && args.start !== undefined) return { ok: false, message: 'start 仅适用于 sequence' }
+      if (!layer.geojson.features.length) return { ok: false, message: '图层没有可编辑的要素' }
+      let count: number
+      if (args.action === 'set') {
+        if (!['number', 'string', 'boolean'].includes(typeof args.value) || (typeof args.value === 'number' && !Number.isFinite(args.value))) {
+          return { ok: false, message: 'set 的 value 必须是有限数字/字符串/布尔' }
+        }
+        if (!args.filterField && (args.filterOperator !== undefined || args.filterValue !== undefined)) return { ok: false, message: '筛选需提供 filterField' }
+        if (args.filterField && !layer.geojson.features.some(f => Object.hasOwn(f.properties ?? {}, args.filterField!))) return { ok: false, message: 'filterField 不存在' }
+        const operator = (args.filterOperator ?? 'eq') as SelectOperator
+        if (args.filterField && !['is_null', 'not_null'].includes(operator) && args.filterValue === undefined) return { ok: false, message: '该筛选算子需提供 filterValue' }
+        count = opSetAttribute(layer, field, args.value as string | number | boolean,
+          args.filterField ? { field: args.filterField, operator, value: args.filterValue } : undefined)
+      } else if (args.action === 'sequence') {
+        const start = args.start ?? 0
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(start + layer.featureCount - 1)) return { ok: false, message: '序号必须在安全整数范围内' }
+        count = opAddSequence(layer, field, start)
+      } else {
+        count = opAddColumn(layer, field)
       }
+      if (!count) return { ok: false, message: args.action === 'add' ? `字段 ${field} 已存在，无需新增` : '没有要素被修改，请检查筛选条件' }
       layer.rev += 1
-      return Promise.resolve({
-        ok: true,
-        layerId: layer.id,
-        featureCount: count,
-        message: `图层 ${layer.id} 已写入字段 ${field}（${count} 个要素${filter ? '，按筛选命中' : '，全部要素'}）`,
-      })
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'webgis_add_sequence',
-    description: COMMON + '给图层的全部要素赋顺序号字段（start..start+n-1，按要素在图层里的顺序，缺省从 0 开始）。原地改并 bump rev，客户端自动重拉。典型用途：给临时/结果图层排个序、做后续按序号筛选的底子；要 1 基递增（如 1..n）传 start:1。',
-    parameters: {
-      layer: LAYER_PARAM,
-      field: { type: 'string', description: '顺序号字段名，缺省 seq' },
-      start: { type: 'number', description: '起点序号，缺省 0（0 基）；要 1 基递增传 1' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          layerId: { type: 'string' },
-          featureCount: { type: 'integer' },
-          message: { type: 'string' },
-        },
-      },
-      render: (_a, v) => text(JSON.stringify(v)),
-    },
-    isConcurrencySafe: () => false,
-    execute(args, exec) {
-      const { resolve } = sess(exec)
-      const layer = resolve(args.layer)
-      if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const field = typeof args.field === 'string' && args.field ? args.field : 'seq'
-      // 大图层的 geojson 只是上图抽样：编号只写进抽样行，且抽样行序 ≠ 源表行序，序号本身也是错的。
-      const merr = requireMaterialized(layer, '写序号')
-      if (merr) return Promise.resolve({ ok: false, message: merr })
-      const start = Number.isFinite(Number(args.start)) ? Math.floor(Number(args.start)) : 0
-      const count = opAddSequence(layer, field, start)
-      layer.rev += 1
-      return Promise.resolve({
-        ok: true,
-        layerId: layer.id,
-        featureCount: count,
-        message: `图层 ${layer.id} 已写入顺序号字段 ${field}（${start}~${start + count - 1}）`,
-      })
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'webgis_add_column',
-    description: COMMON + '给图层的全部要素新增一列空字段（值 null，不填内容）。若字段已存在则提示无需新增。原地改并 bump rev，客户端自动重拉。典型用途：用户说"新增一列/加个字段"时用它（不要用 webgis_set_attribute 填占位值）。',
-    parameters: {
-      layer: LAYER_PARAM,
-      field: { type: 'string', required: true, description: '要新增的字段名' },
-    },
-    output: {
-      schema: LAYER_RESULT_SCHEMA,
-      render: (_a, v) => text(JSON.stringify(v)),
-    },
-    isConcurrencySafe: () => false,
-    execute(args, exec) {
-      const { resolve } = sess(exec)
-      const layer = resolve(args.layer)
-      if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const field = typeof args.field === 'string' && args.field ? args.field : ''
-      if (!field) return Promise.resolve({ ok: false, message: 'field 不能为空' })
-      // 大图层的 geojson 只是上图抽样：列只加到抽样行上，Arrow 渲染读原表 → 新列不可见。
-      const merr = requireMaterialized(layer, '新增字段')
-      if (merr) return Promise.resolve({ ok: false, message: merr })
-      const count = opAddColumn(layer, field)
-      if (count === 0) return Promise.resolve({ ok: false, message: `字段 ${field} 在图层 ${layer.id} 已存在，无需新增` })
-      layer.rev += 1
-      return Promise.resolve({
-        ok: true,
-        layerId: layer.id,
-        featureCount: count,
-        message: `图层 ${layer.id} 已新增空字段 ${field}（${count} 个要素，值为空）`,
-      })
+      return { ok: true, layerId: layer.id, featureCount: count, message: `图层 ${layer.id} 的字段 ${field} 已更新（${count} 个要素，${args.action}${args.action === 'sequence' ? `，${args.start ?? 0}~${(args.start ?? 0) + count - 1}` : ''}）` }
     },
   }))
 

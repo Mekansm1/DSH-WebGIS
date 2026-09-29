@@ -140,14 +140,20 @@ test('规则格网：格数门控用格数判，不是用图层要素数', () =>
   assert.equal(d.isolate, false)
 })
 
-test('注册表：14 个走隔离的工具，timeoutMs 必须取自 GEO_TOOL_TIMEOUTS', () => {
+test('注册表：16 个走隔离的工具，timeoutMs 必须取自 GEO_TOOL_TIMEOUTS', () => {
   // 这条是「预算同源」的守护测试：有人手写回一个数字，这里就红。
+  //
+  // ⚠️ 名单必须与 `await runGeoOp` 的调用点数一一致（`grep -c "await runGeoOp" src/*.ts`）。
+  // 首版名单只有 14 个，漏了第 6 步补进来的 regular_grid / voronoi —— 它们当时写的是字面量
+  // `30000`，数值恰好等于 `GEO_TOOL_TIMEOUTS.op` 所以没暴露，但改 op 预算时那两个不会跟着走，
+  // 就会出现"14 个按新预算、2 个按旧预算"的分裂。名单漏项 = 守护失效，加工具时记得同步这里。
   const defs = []
   registerGeoTools({ tools: { register: (d) => defs.push(d) } }, () => ({ layers: [] }))
   const isolated = [
     'webgis_buffer', 'webgis_dissolve', 'webgis_simplify',
     'webgis_clip', 'webgis_intersect', 'webgis_difference', 'webgis_union',
     'webgis_spatial_join', 'webgis_select_by_location',
+    'webgis_regular_grid', 'webgis_voronoi',
     'webgis_kernel_density', 'webgis_average_nearest_neighbor', 'webgis_moran_i',
     'webgis_local_moran', 'webgis_getis_ord',
   ]
