@@ -6,10 +6,21 @@ Author: Frank Wang · Feedback: [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
 
 ## Compatibility
 
-- **Requires DSH `0.1.7`** (built and tested against `0.1.7-rc.2`). This release is **not compatible with earlier harness versions**: three harness APIs it depends on changed in 0.1.7. If you are on an older DSH, upgrade the harness before updating this plugin.
+- **Requires DSH `0.2.0`** (built and tested against `0.2.0-rc.2`). This release is **not compatible with earlier harness versions**. If you are on an older DSH, upgrade the harness before updating this plugin.
 - Targets the DSH **Web profile** and requires the host `webServer` service. The official Desktop transport is not yet supported.
 - Install: `npx --yes @deepseek-ai/dsh plugin --profile web add dsh-webgis`
 - pnpm ≥ 10 needs no `approve-builds` step: DuckDB ships as the official Node Neo package (`@duckdb/node-api`) with a platform-specific prebuilt binding through optional dependencies. A normal `pnpm install` is sufficient. The platform still has to be one DuckDB Node Neo supports, and packages must be fetchable from the npm registry.
+
+## What's New in 0.2.0
+
+### Harness 0.2.0 adaptation
+
+This release retargets the plugin at DSH `0.2.0`. **No source changes were needed** — every harness API this plugin depends on is unchanged from 0.1.7: the slot registry and its dispatch, the `shell.overlay` and `settings.plugins.tab` slots, the client module-loader protocol that lazy chunks use, the host DOM the GIS layout measures, and the session-list lookup behind the 0.1.5 fix below.
+
+The upgrade was verified by installing both harness versions side by side and diffing their type declarations and client bundles file by file, then confirming typecheck, build, and the full test suite against 0.2.0.
+
+- `@deepseek-ai/cordis` is now `^4.0.4`, matching the peer range the 0.2.0 packages declare. (The previous `^4.0.1` allowed the 4.0.2 we had pinned, so npm never raised it.)
+- Everything in the 0.1.5 section below still applies, including the session-alignment fix — 0.2.0 leaves that code untouched.
 
 ## What's New in 0.1.5
 
@@ -171,7 +182,7 @@ Combined with deck.gl's GPU-driven 3D rendering — hex columns, wall extrusions
 
 ## Installation and Configuration
 
-Requirements: **DSH `0.1.7`** with the web profile, plus `pnpm` on your PATH. (0.1.5 is not compatible with earlier harness versions — see [Compatibility](#compatibility).)
+Requirements: **DSH `0.2.0`** with the web profile, plus `pnpm` on your PATH. (0.2.0 is not compatible with earlier harness versions — see [Compatibility](#compatibility).)
 
 ```bash
 dsh plugin --profile web add dsh-webgis
