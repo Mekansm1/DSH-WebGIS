@@ -109,6 +109,34 @@ export function GisSurface(props: GlobalStandardProps & PropsLocale<'webgis'>) {
     if (pluginEnabled === false && current) webgisModeStore.clearMode(current)
   }, [pluginEnabled, current])
 
+  // 宿主弹窗/菜单（设置、插件、各处下拉菜单）打开时让地图让位：
+  // GIS 地图挂在 shell.overlay（宿主 z-index:20）上，官方桌面端里会盖住宿主弹层。
+  // 检测到宿主 dialog/menu 就加 html[data-webgis-host-modal]，CSS 把地图 visibility 隐藏
+  // （不用 display:none，保持尺寸，避免 maplibre 反复 resize）。
+  useEffect(() => {
+    if (mode !== 'gis' || pluginEnabled === false) return
+    const root = document.documentElement
+    const SELECTOR = '[role="dialog"][aria-modal="true"], [role="menu"], [data-shortcut-modal]'
+    const detect = (): void => {
+      const open = document.querySelector(SELECTOR) != null
+      const marked = root.dataset.webgisHostModal !== undefined
+      if (open && !marked) {
+        root.dataset.webgisHostModal = ''
+        console.info('[webgis] 宿主弹窗/菜单已打开，地图暂时隐藏')
+      } else if (!open && marked) {
+        delete root.dataset.webgisHostModal
+        console.info('[webgis] 宿主弹窗/菜单已关闭，地图恢复')
+      }
+    }
+    detect()
+    const mo = new MutationObserver(detect)
+    mo.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      mo.disconnect()
+      delete root.dataset.webgisHostModal
+    }
+  }, [mode, pluginEnabled])
+
   // 离开一个"未提交"的会话时清掉其模式：DSH 会复用/重新聚焦被隐藏的空白会话，
   // 若不清理，上次选的模式会被当作默认继承，导致新会话不再弹选择器。
   // "未提交" = 会话已从列表移除（被删）或仍是空白（无消息）；有内容的会话模式保留。
@@ -300,10 +328,8 @@ export function GisSurface(props: GlobalStandardProps & PropsLocale<'webgis'>) {
     return () => { cancelled = true }
   }, [mode])
 
-  // 浮动切换按钮：任何非「空白会话待选模式」的状态都显示，随时可在传统/GIS 间切换。
-  // 放在本组件自己的渲染里（shell.overlay 座已确认始终可见：地图/选择器都在这渲染），
-  // 不依赖会话头部 actions 槽——该槽在活跃布局下不可靠（用户实测切换按钮消失）。
-  const showToggle = current !== undefined && !(blank && mode === null)
+  // 模式切换按钮已移到会话标题栏（ModeToggle → conversation.session.header.actions）：
+  // shell.overlay 里的绝对定位浮钮会被官方桌面端的原生标题栏盖住。
 
   // 引导自述：GisSurface 的门禁状态。MapView（= /webgis/state 轮询的所在）只在
   // mode==='gis' 时挂载；mode!=='gis' 或插件停用都会让客户端从不轮询，表现为工具侧一律超时。
@@ -336,16 +362,6 @@ export function GisSurface(props: GlobalStandardProps & PropsLocale<'webgis'>) {
           title={t('layout.resizeHint')}
           onPointerDown={onResizeStart}
         />
-        {showToggle && (
-          <button
-            type="button"
-            className={styles.modeFloat}
-            title={t('mode.toTraditional')}
-            onClick={() => webgisModeStore.setMode(current, 'traditional')}
-          >
-            {t('mode.toTraditional')}
-          </button>
-        )}
       </div>
     )
   }
@@ -355,19 +371,6 @@ export function GisSurface(props: GlobalStandardProps & PropsLocale<'webgis'>) {
     return <ModeSelector onPick={(m) => webgisModeStore.setMode(current, m)} t={t} />
   }
 
-  // 传统模式（或活跃会话尚未选模式）：只渲染一个浮动的「进入 GIS」按钮
-  if (showToggle) {
-    return (
-      <button
-        type="button"
-        className={styles.modeFloat}
-        title={t('mode.toGis')}
-        onClick={() => webgisModeStore.setMode(current, 'gis')}
-      >
-        {t('mode.toGis')}
-      </button>
-    )
-  }
-
+  // 传统模式：地图不渲染；模式切换由标题栏的 ModeToggle 负责（它独立挂载，不依赖本组件）。
   return null
 }

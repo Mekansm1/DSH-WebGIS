@@ -69,6 +69,43 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
     overlaysRef, deckRef, mapRef, sessionRef, ensureDeck, restoreMeasure, loadDataset, lastLayersRef,
   } = host
 
+      /** 上一次施加的顺序签名（图层 id 序列 + 摘要顺序）。相同则跳过 moveLayer。 */
+      let layerOrderSig = ''
+
+      /**
+       * 按摘要顺序（数组末尾 = 地图最上层）重排数据层 z-order。
+       *
+       * 为什么每轮都要检查：maplibre 的 addLayer 总是追加到栈顶，所以某层 rev 变化重建后
+       * 会跑到最上面，把用户拖好的顺序打乱。这里只在「实际层序列或摘要顺序变化」时才动，
+       * 避免每秒无谓 moveLayer 触发重绘。
+       *
+       * 组内相对顺序保持不变（按当前 z 序移动），否则 fill/outline/circle 的叠放会翻转。
+       */
+      const applyLayerOrderIfNeeded = (map: MapLibreMap, summaries: LayerSummary[]): void => {
+        const styleLayers = map.getStyle()?.layers ?? []
+        const desiredKey = summaries.map((s) => s.id).join(',')
+        const sig = `${styleLayers.map((l) => l.id).join(',')}#${desiredKey}`
+        if (sig === layerOrderSig) return
+        const pos = new Map<string, number>()
+        styleLayers.forEach((l, i) => pos.set(l.id, i))
+        try {
+          // 从下往上逐组置顶：后处理的组会盖住先处理的组。
+          for (const s of summaries) {
+            const ids: string[] = []
+            for (const l of styleLayers) {
+              if (l.id.startsWith(`gis-${s.id}-`)) ids.push(l.id)
+              else if (s.id === 'dataset' && l.id === 'data-points') ids.push(l.id)
+            }
+            ids.sort((a, b) => (pos.get(a) ?? 0) - (pos.get(b) ?? 0))
+            for (const id of ids) map.moveLayer(id)
+          }
+          layerOrderSig = `${(map.getStyle()?.layers ?? []).map((l) => l.id).join(',')}#${desiredKey}`
+        } catch {
+          // 样式切换/图层正在销毁：忽略，下一轮再施加
+          layerOrderSig = ''
+        }
+      }
+
       // 同步图层注册表：移除消失的层、按 rev 变更拉全量并 addSource/addLayer、
       // 纯可见性切换走 setLayoutProperty（不重拉数据）。dataset 层由现有 data-points 处理。
       const syncLayers = async (map: MapLibreMap, summaries: LayerSummary[], force = false): Promise<void> => {
@@ -358,6 +395,9 @@ export function createLayerSync(host: LayerSyncHost): LayerSync {
           // 样式未就绪 / 网络抖动：本轮跳过，下一轮重试
           console.warn('[MapView] syncLayers 整轮失败', err)
         }
+        // 图层叠放顺序（面板拖动 / webgis_move_layer）：必须在新建层之后、高亮层置顶之前施加。
+        applyLayerOrderIfNeeded(map, summaries)
+        deckRef.current?.setOrder(summaries.map((s) => s.id))
         // 本轮可能新建了数据层会盖住点击高亮 → 把 gis-sel 层重新置顶（无高亮时是空操作）。
         bringMapSelectionToTop(map)
       }

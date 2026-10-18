@@ -145,12 +145,29 @@ export class DeckController {
     }
   }
 
+  /** 图层叠放顺序（来自注册表数组顺序，末尾 = 最上层）。deck 内没有 moveLayer，只能靠数组次序。 */
+  private order: string[] = []
+  private orderKey = ''
+
+  /** 设置 deck 图层的绘制顺序；顺序变化时才重新下发（避免每轮 setProps 触发重绘）。 */
+  setOrder(ids: string[]): void {
+    const key = ids.join('|')
+    if (key === this.orderKey) return
+    this.orderKey = key
+    this.order = ids
+    this.syncLayers()
+  }
+
   /** 把注册表里的全部 deck 图层一次性下发到 MapboxOverlay（缺 overlay 则尝试惰性创建，避免注册早于 load 被丢）。
-   *  点选高亮层追加在最后 → 渲染在其他 deck 图层之上（deck 内没有 moveLayer，靠数组次序）。 */
+   *  按 order 排序；order 里没有的层（如 Arrow raw 层）排在后面。点选高亮层永远追加在最后。 */
   syncLayers(): void {
     const overlay = this.ensureOverlay()
     if (!overlay) return
-    const layers = Object.values(this.deckLayerCache).flat()
+    const cache = this.deckLayerCache
+    const ordered = this.order.filter((id) => cache[id] !== undefined)
+    const seen = new Set(ordered)
+    const rest = Object.keys(cache).filter((id) => !seen.has(id))
+    const layers = [...ordered, ...rest].flatMap((id) => cache[id] ?? [])
     const sel = makeSelectionLayers(this.selection)
     overlay.setProps({ layers: sel.length ? [...layers, ...sel] : layers })
   }

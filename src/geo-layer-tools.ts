@@ -18,6 +18,7 @@ import {
   summarize,
 } from './geo-processing.js'
 import { RAMPS, buildThematic, formatLegend } from './thematic.js'
+import { moveLayerBy } from './layer-order.js'
 import type { GeoToolRuntime } from './geo-tools-runtime.js'
 
 export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
@@ -153,12 +154,60 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'webgis_move_layer',
+    description: '调整图层的叠放顺序（纯展示变更，不改数据、不重算）。direction：up=上移一层（更靠前/更顶）、down=下移一层、top=置顶、bottom=置底。图层面板里也可以直接拖动排序。图层 id 见 webgis_list_layers。',
+    parameters: {
+      layer: LAYER_PARAM,
+      direction: {
+        type: 'string',
+        enum: ['up', 'down', 'top', 'bottom'],
+        required: true,
+        description: '移动方向：up=上移一层 / down=下移一层 / top=置顶 / bottom=置底',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          layerId: { type: 'string' },
+          order: { type: 'json' },
+          message: { type: 'string' },
+        },
+      },
+      render: (_a, v) => text(JSON.stringify(v)),
+    },
+    isConcurrencySafe: () => false,
+    execute(args, exec) {
+      const { st, resolve } = sess(exec)
+      const layer = resolve(args.layer)
+      if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
+      const dir = args.direction === 'up' || args.direction === 'down'
+        || args.direction === 'top' || args.direction === 'bottom'
+        ? args.direction
+        : 'up'
+      st.layers = moveLayerBy(st.layers, layer.id, dir)
+      const idx = st.layers.findIndex((l) => l.id === layer.id)
+      const label = dir === 'up' ? '上移一层' : dir === 'down' ? '下移一层' : dir === 'top' ? '置于顶层' : '置于底层'
+      return Promise.resolve({
+        ok: true,
+        layerId: layer.id,
+        order: st.layers.map((l) => l.id),
+        message: `图层 ${layer.id} 已${label}（从下往上第 ${idx + 1}/${st.layers.length} 层；数组末尾 = 地图最上层）`,
+      })
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'webgis_set_layer_thematic',
     description: COMMON + '【专题配色·按字段上色】按某个属性字段给图层分箱上色（choropleth），让同一图层不同要素显示不同颜色。'
       + '数值字段用 method=jenks（自然断点，默认，断点落在属性突变处）/ quantile（分位数，每类要素数相等）/ equal（等间距）；'
+      + '用户指定了具体数值区间时用 method=manual，并在 breaks 传升序区间边界、colors 传每级颜色（例如 breaks:[0,100,500,1000] + colors:[…4 个…] 表示 ≤0 / 0~100 / 100~500 / 500~1000 / >1000）。'
       + '文字或离散字段用 method=category（每个取值一个颜色）。'
       + 'ramp 选色带：数值常用 blues/greens/oranges/reds/purples/viridis（顺序型）、spectral（分歧型，有中心意义时用）；'
       + '分类用 set2（定性型）。classes 默认 5 级（2~12）。'
+      + '⚠ 分类字段超过 50 个不同取值时会拒绝并请用户确认（性能/图例开销），用户确认后传 allCategories:true 才全部上色。'
       + '⚠ 缺值**不会**被当成 0 混进某一级 —— 它们单独用中性灰显示，并在结果里报出个数。'
       + '⚠ 这是纯展示变更：不改数据、不影响统计结果。想改回单色用 webgis_set_layer_style 的 color 参数。',
     parameters: {
@@ -166,12 +215,14 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       field: { type: 'string', required: true, description: '用于上色的属性字段（数值列做分箱，文字列按类别）' },
       method: {
         type: 'string',
-        enum: ['jenks', 'quantile', 'equal', 'category'],
-        description: '分箱方法：jenks=自然断点（默认，数值）/ quantile=分位数（数值）/ equal=等间距（数值）/ category=按类别取值（文字列）',
+        enum: ['jenks', 'quantile', 'equal', 'category', 'manual'],
+        description: '分箱方法：jenks=自然断点（默认，数值）/ quantile=分位数（数值）/ equal=等间距（数值）/ manual=用户自定义数值区间（配 breaks+colors）/ category=按类别取值（文字列）',
       },
-      classes: { type: 'integer', description: '分几级，默认 5（2~12）。仅数值型方法有效' },
+      classes: { type: 'integer', description: '分几级，默认 5（2~12）。仅 jenks/quantile/equal 有效' },
+      breaks: { type: 'json', description: 'method=manual 时的升序区间边界数组，如 [0, 100, 500, 1000]（4 个断点 = 5 级；最多 11 个）' },
       ramp: { type: 'string', description: `色带名（默认数值用 blues、分类用 set2）：${Object.keys(RAMPS).join(' / ')}` },
-      colors: { type: 'json', description: '直接指定颜色数组（覆盖 ramp），长度需 ≥ 级数' },
+      colors: { type: 'json', description: '直接指定颜色数组（覆盖 ramp），长度需 ≥ 级数；manual 建议与 breaks 逐级对应' },
+      allCategories: { type: 'boolean', description: '分类字段有 >50 个不同取值时，用户确认全部上色后置 true' },
     },
     output: { schema: LAYER_RESULT_SCHEMA, render: (_a, v) => text(JSON.stringify(v)) },
     timeoutMs: 30000,
@@ -180,11 +231,15 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
       const { resolve } = sess(exec)
       const layer = resolve(args.layer)
       if (typeof layer === 'string') return Promise.resolve({ ok: false, message: layer })
-      const method = args.method === 'jenks' || args.method === 'quantile' || args.method === 'equal' || args.method === 'category'
+      const method = args.method === 'jenks' || args.method === 'quantile' || args.method === 'equal'
+        || args.method === 'category' || args.method === 'manual'
         ? args.method
         : 'jenks'
       const colors = Array.isArray(args.colors)
         ? args.colors.filter((c): c is string => typeof c === 'string' && /^#[0-9a-f]{3,8}$/i.test(c))
+        : undefined
+      const breaks = Array.isArray(args.breaks)
+        ? args.breaks.map(Number)
         : undefined
       const res = buildThematic(layer.geojson, {
         field: args.field,
@@ -192,6 +247,8 @@ export function registerLayerTools(ctx: Context, rt: GeoToolRuntime): void {
         ...(typeof args.classes === 'number' ? { classes: args.classes } : {}),
         ...(typeof args.ramp === 'string' && args.ramp ? { ramp: args.ramp } : {}),
         ...(colors && colors.length ? { colors } : {}),
+        ...(breaks && breaks.length ? { breaks } : {}),
+        ...(args.allCategories === true ? { allCategories: true } : {}),
       })
       if (!res.ok) return Promise.resolve({ ok: false, message: res.message })
       // 纯展示变更：原地写、不 bump rev（客户端按 thematic 字段重渲染，不重拉数据）。

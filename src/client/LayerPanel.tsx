@@ -123,6 +123,11 @@ export function LayerPanel(props: {
   /** 乐观显隐覆盖：用户点击 checkbox 后立即按意图显示（不等 1s 轮询回显），
    *  服务器确认后（l.visible === override）清除。避免受控 checkbox 被旧值拉回、需点多次。 */
   const [visOverride, setVisOverride] = useState<Record<string, boolean>>({})
+  /** 拖动排序的乐观顺序（服务器数组顺序，从下到上）；轮询回显一致后清除。 */
+  const [orderOverride, setOrderOverride] = useState<string[] | null>(null)
+  /** 正在拖动的图层 id 与当前悬停的显示下标（拖拽提示用）。 */
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
 
   const action = async (body: Record<string, unknown>): Promise<void> => {
     try {
@@ -147,6 +152,46 @@ export function LayerPanel(props: {
       return Object.keys(next).length === Object.keys(prev).length ? prev : next
     })
   }, [props.layers])
+
+  // 服务端顺序追上乐观顺序后清除覆盖（否则拖动后的本地顺序会永久压住真实顺序）。
+  useEffect(() => {
+    setOrderOverride((prev) => {
+      if (!prev) return prev
+      const ids = props.layers.map((l) => l.id)
+      return ids.join('|') === prev.join('|') ? null : prev
+    })
+  }, [props.layers])
+
+  /**
+   * 面板显示顺序：**顶部 = 地图最上层**。
+   * 服务端数组约定是从下到上（末尾 = 最上层），所以显示时反转。
+   * orderOverride 只记录「数组里仍存在的 id」；新出现的图层追加到末尾（最上层）。
+   */
+  const baseLayers = ((): LayerSummary[] => {
+    if (!orderOverride) return props.layers
+    const byId = new Map(props.layers.map((l) => [l.id, l]))
+    const ordered = orderOverride
+      .map((id) => byId.get(id))
+      .filter((l): l is LayerSummary => l !== undefined)
+    const rest = props.layers.filter((l) => !orderOverride.includes(l.id))
+    return [...ordered, ...rest]
+  })()
+  const shownLayers = [...baseLayers].reverse()
+
+  /** 把图层拖到某个显示位置：换算成服务端数组下标后 POST（乐观更新本地顺序）。 */
+  const moveToDisplayIndex = (id: string, displayIndex: number): void => {
+    const ids = shownLayers.map((l) => l.id)
+    const from = ids.indexOf(id)
+    if (from < 0) return
+    const to = Math.max(0, Math.min(ids.length - 1, displayIndex))
+    if (from === to) return
+    const nextDisplay = [...ids]
+    nextDisplay.splice(from, 1)
+    nextDisplay.splice(to, 0, id)
+    const nextBase = [...nextDisplay].reverse() // 显示是从上到下，数组是从下到上
+    setOrderOverride(nextBase)
+    void action({ id, action: 'move', toIndex: nextBase.indexOf(id) })
+  }
 
   /** 显隐切换：先乐观翻转本地覆盖 + 地图上立即生效（视觉即时，不再等服务器回显/轮询），
    *  再 POST set-visible（幂等、明确目标值；服务器确认后移除覆盖）。 */
@@ -320,14 +365,49 @@ export function LayerPanel(props: {
             />
           </div>
           <div className={styles.layerList}>
-            {props.layers.length === 0 && <div className={styles.layerEmpty}>{props.t('layer.empty')}</div>}
-            {props.layers.map((l) => (
+            {shownLayers.length === 0 && <div className={styles.layerEmpty}>{props.t('layer.empty')}</div>}
+            {shownLayers.map((l, displayIndex) => (
               <div
                 key={l.id}
-                className={styles.layerRow}
+                className={`${styles.layerRow}${dragId === l.id ? ` ${styles.layerRowDragging}` : ''}${dropIndex === displayIndex && dragId !== null ? ` ${styles.layerRowDropTarget}` : ''}`}
                 title={props.t('layer.rowMenuHint')}
-                onContextMenu={(e) => openMenu(e, l)}
+                onContextMenu={(e) => {
+                  // 拖动过程中不弹右键菜单（避免与拖放冲突）
+                  if (dragId) e.preventDefault()
+                  else openMenu(e, l)
+                }}
+                onDragOver={(e) => {
+                  if (!dragId) return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  if (dropIndex !== displayIndex) setDropIndex(displayIndex)
+                }}
+                onDragLeave={() => {
+                  if (dropIndex === displayIndex) setDropIndex(null)
+                }}
+                onDrop={(e) => {
+                  if (!dragId) return
+                  e.preventDefault()
+                  const id = dragId
+                  setDragId(null)
+                  setDropIndex(null)
+                  moveToDisplayIndex(id, displayIndex)
+                }}
               >
+                <span
+                  className={styles.layerGrip}
+                  title={props.t('layer.dragHint')}
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('text/plain', l.id)
+                    setDragId(l.id)
+                  }}
+                  onDragEnd={() => {
+                    setDragId(null)
+                    setDropIndex(null)
+                  }}
+                >⋮⋮</span>
                 <label className={styles.layerVis} title={(visOverride[l.id] ?? l.visible) ? props.t('layer.visOn') : props.t('layer.visOff')}>
                   <input
                     type="checkbox"

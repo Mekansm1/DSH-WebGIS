@@ -10,6 +10,7 @@ import { toCsv, toGeoJSON, toShpZip } from './geo-export.js'
 import { stripBom } from './text-utils.js'
 import { loadCsvText, parseShapefileBuffer } from './dataset-load.js'
 import { makeResultLayer, normalizeFC } from './geo-processing.js'
+import { moveLayerTo } from './layer-order.js'
 import { ingestBigGeojson, type IngestBigResult } from './duckdb-tools.js'
 import type { FeatureCollection } from 'geojson'
 import type { GeoJson } from './session-state.js'
@@ -20,7 +21,7 @@ export const handleLayerAction: RouteHandler = (req, res, _url, _pathname, _sess
   return void (async () => {
     try {
       const raw = await readBody(req, MAX_LAYER_ACTION_BODY)
-      const data = JSON.parse(raw) as { id?: unknown; action?: unknown; visible?: unknown }
+      const data = JSON.parse(raw) as { id?: unknown; action?: unknown; visible?: unknown; toIndex?: unknown }
       const id = typeof data.id === 'string' ? data.id : ''
       const action = typeof data.action === 'string' ? data.action : ''
       const layer = state.layers.find((l) => l.id === id)
@@ -41,6 +42,18 @@ export const handleLayerAction: RouteHandler = (req, res, _url, _pathname, _sess
         const visible = action === 'toggle' ? !layer.visible : data.visible === true
         layer.visible = visible
         return void json(res, { ok: true, layerId: id, visible, message: `图层 ${id} ${visible ? '已显示' : '已隐藏'}` })
+      }
+      if (action === 'move') {
+        // 调整叠放顺序：数组末尾 = 地图最上层。纯展示变更，不 bump rev、不重拉数据。
+        const toIndex = typeof data.toIndex === 'number' ? data.toIndex : Number.NaN
+        if (!Number.isFinite(toIndex)) return void jsonError(res, 400, 'move 需要 toIndex（数字）')
+        state.layers = moveLayerTo(state.layers, id, toIndex)
+        return void json(res, {
+          ok: true,
+          layerId: id,
+          order: state.layers.map((l) => l.id),
+          message: `图层 ${id} 已移动到从下往上第 ${state.layers.findIndex((l) => l.id === id) + 1} 层`,
+        })
       }
       return void jsonError(res, 400, `未知操作 ${action}`)
     } catch (err) {

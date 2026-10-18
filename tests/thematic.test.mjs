@@ -141,13 +141,52 @@ test('buildThematic: 分类缺值单独计数', () => {
   assert.deepEqual(r.spec.categories, ['a', 'b'])
 })
 
-test('buildThematic: 类别过多时截断，并告知有低频类未上色', () => {
+test('buildThematic: 类别超过 50 个时交回用户确认（不静默截断）', () => {
   const many = Array.from({ length: MAX_CATEGORIES + 5 }, (_, i) =>
     Array.from({ length: MAX_CATEGORIES + 5 - i }, () => `c${i}`)).flat()
   const r = buildThematic(cats(many), { field: 'k', method: 'category' })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /超过 50 个/)
+  assert.match(r.message, /allCategories/)
+  assert.match(r.message, /性能/)
+
+  // 用户确认后可全部上色；颜色由 distinctPalette 自动生成，数量与类别一致
+  const ok = buildThematic(cats(many), { field: 'k', method: 'category', allCategories: true })
+  assert.equal(ok.ok, true)
+  assert.equal(ok.spec.categories.length, MAX_CATEGORIES + 5)
+  assert.equal(ok.spec.colors.length, MAX_CATEGORIES + 5)
+  assert.equal(new Set(ok.spec.colors).size, MAX_CATEGORIES + 5, '每个类别应有不同颜色')
+})
+
+// ---- buildThematic：自定义区间 ----
+
+test('buildThematic: manual 用用户给定区间分箱，颜色逐级对应', () => {
+  const r = buildThematic(pts([-5, 0, 50, 100, 300, 800, 1500]), {
+    field: 'v', method: 'manual',
+    breaks: [0, 100, 500, 1000],
+    colors: ['#111111', '#222222', '#333333', '#444444', '#555555'],
+  })
   assert.equal(r.ok, true)
-  assert.equal(r.spec.categories.length, MAX_CATEGORIES)
-  assert.match(r.labels.join(''), /未上色/, '截断了必须说，不能让用户以为画全了')
+  assert.deepEqual(r.spec.breaks, [0, 100, 500, 1000])
+  assert.equal(r.spec.colors.length, 5)
+  // ≤0 / 0~100 / 100~500 / 500~1000 / >1000
+  assert.deepEqual(r.counts, [2, 2, 1, 1, 1])
+  assert.match(r.labels[0], /≤ 0/)
+  assert.match(r.labels[4], /> 1000/)
+})
+
+test('buildThematic: manual 断点必须升序且为有限数值', () => {
+  const unsorted = buildThematic(pts([1, 2, 3]), { field: 'v', method: 'manual', breaks: [100, 0] })
+  assert.equal(unsorted.ok, false)
+  assert.match(unsorted.message, /严格升序/)
+
+  const nan = buildThematic(pts([1, 2, 3]), { field: 'v', method: 'manual', breaks: [0, Number.NaN] })
+  assert.equal(nan.ok, false)
+  assert.match(nan.message, /有限数值/)
+
+  const missing = buildThematic(pts([1, 2, 3]), { field: 'v', method: 'manual' })
+  assert.equal(missing.ok, false)
+  assert.match(missing.message, /breaks/)
 })
 
 // ---- 错误路径：中文可懂 ----

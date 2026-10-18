@@ -19,12 +19,15 @@ export type ClassifyMethod =
   | 'equal'
   /** 分类（文字/离散取值）：每个不同取值一个颜色。 */
   | 'category'
+  /** 自定义区间：用户直接给定升序断点（区间边界），每级一个颜色。 */
+  | 'manual'
 
 export const METHOD_LABEL: Record<ClassifyMethod, string> = {
   jenks: '自然断点',
   quantile: '分位数',
   equal: '等间距',
   category: '按类别',
+  manual: '自定义区间',
 }
 
 /** 色带目录：顺序型（数值）与定性型（分类）分开，避免用彩虹色画有序数据。 */
@@ -54,8 +57,13 @@ export const MAX_CLASSES = 12
  * 2000 时约 10M 次运算（几十毫秒）；再大就会让一次工具调用卡住秒级。
  */
 export const JENKS_SAMPLE_CAP = 2000
-/** 分类方法的类别数上限：再多就不是「上色」是「花屏」了。 */
-export const MAX_CATEGORIES = 12
+/**
+ * 分类方法的**软上限**：超过 50 个不同取值时不再默默截断，而是把选择交回用户
+ * （全部上色 / 改用数值分箱 / 先筛选）。用户确认后仍可上色的硬上限见 MAX_CATEGORIES_HARD。
+ */
+export const MAX_CATEGORIES = 50
+/** 全部上色的硬上限（防止给一个 10 万取值的 id 列硬出一条巨型 match 表达式）。 */
+export const MAX_CATEGORIES_HARD = 500
 
 /** 按目标类别数从色带采样（色带不够长时循环取，够长时均匀抽）。 */
 export function rampColors(ramp: string, n: number): string[] {
@@ -66,6 +74,34 @@ export function rampColors(ramp: string, n: number): string[] {
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1)
     out.push(base[Math.round(t * (base.length - 1))]!)
+  }
+  return out
+}
+
+/** HSL → #rrggbb（distinctPalette 专用；输入已钳制到合法范围）。 */
+function hslToHex(h: number, s: number, l: number): string {
+  const sn = s / 100
+  const ln = l / 100
+  const k = (n: number): number => (n + h / 30) % 12
+  const a = sn * Math.min(ln, 1 - ln)
+  const f = (n: number): number => ln - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))
+  const to = (x: number): string => Math.round(x * 255).toString(16).padStart(2, '0')
+  return `#${to(f(0))}${to(f(8))}${to(f(4))}`
+}
+
+/**
+ * 生成 n 个区分度较好的颜色（类别数超过内置色带长度时使用）。
+ * 黄金角步进（137.508°）让相邻类别色相尽量拉开；明度/饱和度周期性变化增加区分度。
+ * 结果确定性（同 n 同色），便于复现图例。
+ */
+export function distinctPalette(n: number): string[] {
+  const out: string[] = []
+  const GOLDEN_ANGLE = 137.508
+  for (let i = 0; i < n; i++) {
+    const h = (i * GOLDEN_ANGLE) % 360
+    const s = i % 2 === 0 ? 62 : 48
+    const l = i % 3 === 0 ? 52 : 42
+    out.push(hslToHex(h, s, l))
   }
   return out
 }
@@ -197,6 +233,10 @@ export interface ThematicOptions {
   ramp?: string
   /** 直接指定颜色（覆盖 ramp）。 */
   colors?: string[]
+  /** method='manual' 时的升序区间断点（长度 = 级数-1）。 */
+  breaks?: number[]
+  /** method='category' 且不同取值 > MAX_CATEGORIES 时，用户确认后置 true 才全部上色。 */
+  allCategories?: boolean
 }
 
 /** 数值区间 → 可读标签。 */
@@ -245,10 +285,29 @@ export function buildThematic(fc: FeatureCollection, opts: ThematicOptions): The
       return { ok: false, message: `字段 ${field} 只有一个取值（${[...counts.keys()][0]}），不需要专题配色 —— 用 webgis_set_layer_style 的 color 参数设置单色即可` }
     }
     const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
-    const truncated = sorted.length > MAX_CATEGORIES
-    const picked = truncated ? sorted.slice(0, MAX_CATEGORIES) : sorted
+    // 超过软上限不再默默截断：把选择交回用户（全部上色 / 改数值分箱 / 先筛选）。
+    if (sorted.length > MAX_CATEGORIES && !opts.allCategories) {
+      return {
+        ok: false,
+        message: `字段 ${field} 有 ${sorted.length} 个不同取值（超过 ${MAX_CATEGORIES} 个）。全部按类别上色会产生大量图例并可能影响渲染性能。`
+          + '请先让用户在以下方案中选择：① 确认全部上色（再次调用时传 allCategories:true）'
+          + '② 若该字段本质是数值，改用 jenks/quantile/equal 或自定义区间（method=manual + breaks）'
+          + '③ 先筛选出关注的类别再上色。',
+      }
+    }
+    if (sorted.length > MAX_CATEGORIES_HARD) {
+      return {
+        ok: false,
+        message: `字段 ${field} 有 ${sorted.length} 个不同取值，超过全部上色的硬上限 ${MAX_CATEGORIES_HARD}，无法一次全部上色；请先筛选或改用数值分箱。`,
+      }
+    }
+    const picked = sorted
     const ramp = opts.ramp ?? CATEGORY_RAMP
-    const colors = opts.colors ?? rampColors(ramp, picked.length)
+    // 类别数超过内置色带长度时自动生成区分度足够的颜色（否则相邻类别会拿到同一个颜色）。
+    const autoColors = picked.length > (RAMPS[ramp]?.length ?? 0)
+      ? distinctPalette(picked.length)
+      : rampColors(ramp, picked.length)
+    const colors = opts.colors ?? autoColors
     if (colors.length < picked.length) {
       return { ok: false, message: `给了 ${colors.length} 个颜色但有 ${picked.length} 个类别，颜色数不足` }
     }
@@ -258,13 +317,10 @@ export function buildThematic(fc: FeatureCollection, opts: ThematicOptions): The
       missing, ramp: opts.colors ? 'custom' : ramp,
     }
     const labels = categories.map((c, i) => `${c}（${picked[i]![1]}）`)
-    if (truncated) {
-      labels.push(`（另有 ${sorted.length - MAX_CATEGORIES} 个低频类别未上色，归入「无数据」灰）`)
-    }
     return { ok: true, spec, counts: picked.map(([, c]) => c), labels }
   }
 
-  // ---- 数值型（jenks / quantile / equal）----
+  // 数值列（manual 与自动分箱共用）
   const xs: number[] = []
   let missing = 0
   for (const f of feats) {
@@ -272,6 +328,51 @@ export function buildThematic(fc: FeatureCollection, opts: ThematicOptions): The
     if (Number.isFinite(x)) xs.push(x)
     else missing++
   }
+
+  // ---- 自定义区间（用户给定断点 + 颜色）----
+  if (method === 'manual') {
+    const raw = opts.breaks
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return { ok: false, message: `method=manual 需要提供 breaks（升序区间边界数组），例如 [0, 100, 500, 1000] 表示 4 级` }
+    }
+    const breaks = raw.map(Number)
+    if (!breaks.every((b) => Number.isFinite(b))) {
+      return { ok: false, message: 'breaks 必须是有限数值数组' }
+    }
+    if (!breaks.every((b, i) => i === 0 || b > breaks[i - 1]!)) {
+      return { ok: false, message: `breaks 必须严格升序（当前：${breaks.join(', ')}）` }
+    }
+    if (breaks.length > MAX_CLASSES - 1) {
+      return { ok: false, message: `breaks 最多 ${MAX_CLASSES - 1} 个（即最多 ${MAX_CLASSES} 级），当前 ${breaks.length} 个` }
+    }
+    if (xs.length === 0) {
+      return { ok: false, message: `字段 ${field} 没有任何有效数值，无法按区间上色` }
+    }
+    const levels = breaks.length + 1
+    const ramp = opts.ramp ?? DEFAULT_RAMP
+    const colors = opts.colors ?? rampColors(ramp, levels)
+    if (colors.length < levels) {
+      return { ok: false, message: `给了 ${colors.length} 个颜色但分了 ${levels} 级，颜色数不足` }
+    }
+    const counts = new Array<number>(levels).fill(0)
+    for (const x of xs) {
+      let idx = breaks.findIndex((b) => x <= b)
+      if (idx === -1) idx = levels - 1
+      counts[idx]! += 1
+    }
+    const labels = counts.map((c, i) => {
+      const lo = i === 0 ? null : breaks[i - 1]!
+      const hi = i === levels - 1 ? null : breaks[i]!
+      return `${rangeLabel(lo, hi)}（${c}）`
+    })
+    const spec: ThematicSpec = {
+      field, method, breaks, colors: colors.slice(0, levels), missing,
+      ramp: opts.colors ? 'custom' : ramp,
+    }
+    return { ok: true, spec, counts, labels }
+  }
+
+  // ---- 数值型（jenks / quantile / equal）----
   if (xs.length < 3) {
     return { ok: false, message: `字段 ${field} 的有效数值不足（${xs.length} 个），无法分箱` }
   }

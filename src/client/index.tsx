@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 // 所以本插件依赖 ui-settings 取类型，运行时仍由宿主提供该实例。
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { GisSurface } from './GisSurface.js'
+import { ModeToggle } from './ModeToggle.js'
 import { WebgisConfigCard } from './WebgisConfigCard.js'
 import { installWebgisLocale, WEBGIS_NS } from './webgis-i18n.js'
 
@@ -71,4 +72,14 @@ export function apply(ctx: Context): void {
     id: 'dsh-webgis-surface',
     locale: WEBGIS_NS,
   } as { name: 'shell.overlay'; id: string; locale: 'webgis' }, GisSurface)))
+
+  // 会话标题栏的模式切换（标题 / 标准模式 / 导出 / 折叠 那一行）。
+  // 以前是 shell.overlay 里的绝对定位浮钮，官方桌面端会被原生标题栏盖住；标题栏在宿主 DOM 内，不受影响。
+  // 会话作用域 slot 直接注入 sessionId，无需再推导当前会话。
+  ctx.slots.inject('conversation.session.header.actions', () => (console.info('[webgis] header mode toggle registered'), ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'webgis-mode-toggle',
+    order: 10,
+    locale: WEBGIS_NS,
+  } as { name: 'conversation.session.header.actions'; id: string; order: number; locale: 'webgis' }, ModeToggle)))
 }

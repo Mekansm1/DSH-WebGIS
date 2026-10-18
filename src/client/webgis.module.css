@@ -103,31 +103,39 @@
   border-color: #3b82f6;
 }
 
-/* 浮动模式切换按钮：活跃会话里随时切换传统/GIS。
-   GIS 模式下渲染在地图层内（地图右上角）；传统模式下渲染为 overlay 直接子元素（全屏右上角）。
-   两种上下文都用 position:absolute + top/right 定位，离 position:absolute 的 overlayLayer 定位。 */
-.modeFloat {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 40;
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid #3b82f6;
-  background: rgba(26, 35, 50, 0.92);
-  color: #e7ecf3;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+/* 会话标题栏里的模式切换（ModeToggle → conversation.session.header.actions）。
+   紧凑两字标签：GIS 模式下对话列只有 360px，长文案会挤掉标题。 */
+.headerModeToggle {
+  appearance: none;
+  font: inherit;
   font-size: 12px;
-  font-weight: 500;
-  line-height: 1.4;
+  line-height: 20px;
+  height: 24px;
+  padding: 0 9px;
+  margin-right: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l1, #2d3a4f);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #9aa8bc);
   cursor: pointer;
-  pointer-events: auto;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
 }
 
-.modeFloat:hover {
-  border-color: #60a5fa;
-  background: #243044;
+.headerModeToggle:hover {
+  color: var(--dsw-alias-label-primary, #e7ecf3);
+  border-color: #3b82f6;
+}
+
+.headerModeToggleActive {
+  color: #fff;
+  background: #1e4a8a;
+  border-color: #3b82f6;
+}
+
+.headerModeToggleActive:hover {
+  background: #2a5fb0;
 }
 
 /* ============ 点击属性浮窗（maplibre Popup 内容 + 深色覆盖） ============ */
@@ -379,6 +387,31 @@
   padding: 5px 6px;
   border-radius: 6px;
   cursor: context-menu;
+  user-select: none;
+}
+
+/* 拖动排序手柄：列表顶部 = 地图最上层 */
+.layerGrip {
+  flex: none;
+  cursor: grab;
+  color: #6b7a90;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: -2px;
+  padding: 0 1px;
+}
+
+.layerGrip:active {
+  cursor: grabbing;
+}
+
+.layerRowDragging {
+  opacity: 0.45;
+}
+
+.layerRowDropTarget {
+  outline: 1px dashed #3b82f6;
+  outline-offset: -1px;
 }
 
 .layerRow:hover {
@@ -1333,6 +1366,17 @@
      缺省 360px）。地图与对话列引用同一变量，避免两处硬编码漂移。
      --webgis-rightbar-width：宿主右侧栏（0.1.5+ 的 rightbar 网格轨道，折叠时为 0）。 */
   right: calc(var(--webgis-chat-width, 360px) + var(--webgis-rightbar-width, 0px));
+}
+
+/* 0. 宿主弹层优先：shell.overlay 原生 z-index:20，桌面端设置/插件面板可能低于它而被地图盖住。
+      降到 5（仍高于普通文档流），并在地图组件检测到宿主 dialog/menu 时直接隐藏地图（见 GisSurface）。 */
+:global(html[data-webgis-gis]) [data-shell-overlay] {
+  z-index: 5;
+}
+
+:global(html[data-webgis-gis][data-webgis-host-modal]) .gisLayer {
+  /* visibility 而非 display：保持盒子尺寸，避免 maplibre 反复 resize / 相机抖动 */
+  visibility: hidden;
 }
 
 /* （右侧栏全屏无需特殊处理：面板是 position:fixed; inset:0; z-index:40，

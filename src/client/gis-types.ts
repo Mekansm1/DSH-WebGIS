@@ -16,7 +16,7 @@ export type DisplayMode = 'points' | 'plane' | 'hex' | 'arc' | 'trips' | 'wall' 
  */
 export interface ThematicSpec {
   field: string
-  method: 'jenks' | 'quantile' | 'equal' | 'category'
+  method: 'jenks' | 'quantile' | 'equal' | 'category' | 'manual'
   /** 长度 = breaks.length + 1（数值）或 = categories.length（分类）。 */
   colors: string[]
   /** 数值型：升序内部分界点。 */

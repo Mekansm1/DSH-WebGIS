@@ -85,7 +85,7 @@ test('registerGeoTools：经 inject 注册全局工具纪律系统提示段（#6
   assert.ok(defs.length >= 35)
 })
 
-test('全部 41 个 geo 工具注册正确（颜色工具已并入样式工具）', () => {
+test('全部 42 个 geo 工具注册正确（颜色工具已并入样式工具）', () => {
   const { defs } = setup()
   const names = defs.map((d) => d.name).sort()
   const expected = [
@@ -93,7 +93,7 @@ test('全部 41 个 geo 工具注册正确（颜色工具已并入样式工具�
     'webgis_buffer', 'webgis_centroids', 'webgis_clear_layers', 'webgis_clip',
     'webgis_convex_hull', 'webgis_difference', 'webgis_dissolve', 'webgis_explode', 'webgis_export_basemap',
     'webgis_feature_summary', 'webgis_getis_ord', 'webgis_gini', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
-    'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
+    'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_move_layer', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
     'webgis_reproject', 'webgis_select_by_location', 'webgis_select_by_value',
     'webgis_edit_field', 'webgis_set_heatmap_mode', 'webgis_set_layer_style', 'webgis_set_layer_thematic',
     'webgis_set_layer_visibility',
@@ -218,6 +218,28 @@ test('list_layers / layer_info / feature_summary 形状', async () => {
   assert.equal(sum.value, 300)
   const cnt = await run('webgis_feature_summary', { layer: 'dataset', field: 'name', stat: 'count' })
   assert.equal(cnt.value, 2)
+})
+
+test('move_layer: 调整叠放顺序（数组末尾 = 地图最上层）', async () => {
+  const extra = makeResultLayer({
+    id: 'result_1', name: '结果层',
+    geojson: featureCollection([square(1, 1, 2, 2)]),
+    source: 'gis-result',
+  })
+  const { state, run } = setup([polygonLayer, extra])
+  assert.deepEqual(state.layers.map((l) => l.id), ['dataset', 'result_1'])
+
+  const top = await run('webgis_move_layer', { layer: 'dataset', direction: 'top' })
+  assert.equal(top.ok, true)
+  assert.deepEqual(state.layers.map((l) => l.id), ['result_1', 'dataset'])
+  assert.deepEqual(top.order, ['result_1', 'dataset'])
+
+  const down = await run('webgis_move_layer', { layer: 'dataset', direction: 'down' })
+  assert.equal(down.ok, true)
+  assert.deepEqual(state.layers.map((l) => l.id), ['dataset', 'result_1'])
+
+  const unknown = await run('webgis_move_layer', { layer: 'nope', direction: 'up' })
+  assert.equal(unknown.ok, false)
 })
 
 test('remove_layer / clear_layers / set_layer_visibility', async () => {
