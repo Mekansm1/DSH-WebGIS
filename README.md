@@ -7,7 +7,7 @@ Author: Frank Wang · Feedback: [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
 ## Compatibility
 
 - WebGIS `0.2.2` targets **DSH `0.2.2-rc.1`** and **Node.js `>=24.9.0`**. For WebGIS `0.2.1`, use DSH `0.2.1-rc.2`.
-- Targets the DSH **Web profile** and requires the host `webServer` service. The official Desktop transport is not yet supported.
+- The DSH **Web profile** setup uses the host's `webServer` service.
 - Install WebGIS 0.2.2 with `npx --yes @deepseek-ai/dsh@0.2.2-rc.1 plugin --profile web add dsh-webgis@0.2.2`.
 - pnpm ≥ 10 needs no `approve-builds` step: DuckDB ships as the official Node Neo package (`@duckdb/node-api`) with a platform-specific prebuilt binding through optional dependencies. A normal `pnpm install` is sufficient. The platform still has to be one DuckDB Node Neo supports, and packages must be fetchable from the npm registry.
 
@@ -95,7 +95,7 @@ The previous names are no longer registered. `webgis_feature_summary` returns on
 
 Scope: small workloads still execute synchronously on the host thread. Workload thresholds do not guarantee that every complex geometry runs off-thread; this release does not promise universally non-blocking execution. Worker payload encoding and result decoding also require host-thread work.
 
-Compatibility: this release targets the DSH **Web profile** and requires the host's `webServer` service. The official Desktop transport is **not yet supported**. That release's DSH `0.1.5-rc1` baseline was superseded in 0.1.5 — see [Compatibility](#compatibility).
+This release's DSH `0.1.5-rc1` baseline was superseded in 0.1.5. See [Compatibility](#compatibility).
 
 ## What's New in 0.1.3
 
@@ -213,7 +213,7 @@ Combined with deck.gl's GPU-driven 3D rendering — hex columns, wall extrusions
 
 ## Installation and Configuration
 
-WebGIS 0.2.2 requires **DSH `0.2.2-rc.1`** with the web profile and `pnpm` on your PATH.
+For the Web installation of WebGIS 0.2.2, use **DSH `0.2.2-rc.1`** with the web profile and `pnpm` on your PATH.
 
 ```bash
 dsh plugin --profile web add dsh-webgis@0.2.2
