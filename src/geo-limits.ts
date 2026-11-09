@@ -18,6 +18,9 @@
  */
 export const MAX_GRID_CELLS = 40000
 
+/** 一次工具调用中可批量创建的点数。 */
+export const MAX_POINT_BATCH = 500
+
 /**
  * knn 空间权重矩阵可支持的最大要素数(O(n²) 排序;超过请改用 distance/queen)。
  * 由 `makeWeightMatrix` 的 knn 分支检查,间接约束 Moran / Local Moran / Getis-Ord。

@@ -20,6 +20,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { createGeoToolRuntime } from './geo-tools-runtime.js'
 import type { GeoRegistryState, GeoToolDeps, LayerLifecycleHooks } from './geo-tools-runtime.js'
 import { registerConstructTools } from './geo-construct-tools.js'
+import { registerCreateTools } from './geo-create-tools.js'
 import { registerOverlayTools } from './geo-overlay-tools.js'
 import { registerQueryTools } from './geo-query-tools.js'
 import { registerVectorTools } from './geo-vector-tools.js'
@@ -75,6 +76,7 @@ export function registerGeoTools(
   const rt = createGeoToolRuntime(stateFor, hooks, deps)
 
   // ---- 七个功能域（注册顺序与拆分前 registerGeoTools 大函数内一致）----
+  registerCreateTools(ctx, rt)
   registerConstructTools(ctx, rt)
   registerOverlayTools(ctx, rt)
   registerQueryTools(ctx, rt)

@@ -131,8 +131,10 @@ export interface WebgisState {
   dataset: DatasetInfo | null
   navigate: NavigateIntent | null
   pick: PickState | null
+  /** 近期由截图工具交给模型的截图，按编号保留反投影视口。 */
+  screenshots: Map<number, PickScreenshot>
   /** host 发起「捕获当前视图」请求（无点击记录时由 webgis_get_pick 设置，客户端轮询消费）。 */
-  capture: { seq: number } | null
+  capture: { seq: number; pick?: PickState } | null
   /** 客户端上报的捕获失败信息（一次一报，读取后清空）。 */
   captureError: string | null
   /**
@@ -168,7 +170,7 @@ const ANON_KEY = 'anon'
 
 export function emptyWebgisState(): WebgisState {
   return {
-    dataset: null, navigate: null, pick: null, capture: null, captureError: null, lastClientPollAt: null,
+    dataset: null, navigate: null, pick: null, screenshots: new Map(), capture: null, captureError: null, lastClientPollAt: null,
     exportRequest: null, exportImage: null, exportError: null,
     basemapRequest: null, basemapResult: null, basemapError: null,
     layers: [],

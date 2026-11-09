@@ -17,6 +17,7 @@ import * as dshSettingsModule from '@deepseek-ai/dsh-settings'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import { registerPixelTools } from './pixel-tools.js'
+import { registerLocatorTool } from './locator-tools.js'
 import type { VisionConfig, VisionAnalysisResult } from './vision-chain.js'
 import { analyzeScreenshotChain } from './vision-chain.js'
 import { makeResultLayer, summarize } from './geo-processing.js'
@@ -32,7 +33,7 @@ import { getDuckDb, type DuckDbOptions } from './duckdb.js'
 import { createFullTableAttrFilter } from './duckdb/attr-filter.js'
 import { isWebgisRouteBlocked, loadPluginEnabled } from './enabled.js'
 import { webgisToolGuardReason } from './tool-guard.js'
-import { SessionStateStore } from './session-state.js'
+import { emptyWebgisState, SessionStateStore } from './session-state.js'
 import type { DatasetInfo, GeoJson, WebgisState } from './session-state.js'
 import type { FeatureCollection } from 'geojson'
 // 声明合并触发器：让 ctx.webServer / 会话类型可见
@@ -44,7 +45,7 @@ import { arrowCacheClearSession, dropLayerResources } from './arrow-cache.js'
 export { dropLayerResources } from './arrow-cache.js'
 import { headerString, isTrustedLocalRequest, jsonError, notFound } from './http-utils.js'
 import {
-  digestLine, layerDigest, modelSupportsImage, screenshotMeta,
+  digestLine, layerDigest, modelSupportsImage, rememberScreenshot, screenshotMeta,
   type LayerDigest, type ScreenshotMeta,
 } from './screenshot-utils.js'
 import { loadDataset } from './dataset-load.js'
@@ -148,12 +149,7 @@ export function apply(ctx: Context, config: Config): void {
   // 工具侧 exec.agent?.id 与客户端 ?session=<会话 id> 共用同一键，互不串扰、销毁即回收。
   let defaultDataset: DatasetInfo | null = null
   const states = new SessionStateStore(() => {
-    const st: WebgisState = {
-      dataset: null, navigate: null, pick: null, capture: null, captureError: null, lastClientPollAt: null,
-      exportRequest: null, exportImage: null, exportError: null,
-      basemapRequest: null, basemapResult: null, basemapError: null,
-      layers: [],
-    }
+    const st = emptyWebgisState()
     // 已配置默认数据集时，新会话各自带上独立副本（后续加载别的数据不影响其他会话）。
     if (defaultDataset) seedDataset(st, defaultDataset)
     return st
@@ -248,6 +244,8 @@ export function apply(ctx: Context, config: Config): void {
     st.layers = [layer, ...st.layers.filter((l) => l.id !== 'dataset')]
   }
   const seqs = { navigateSeq: 0, captureSeq: 0, pickSeq: 0, importSeq: 0, datasetSeq: 0, exportSeq: 0, basemapSeq: 0 }
+  const captureView = (sessionId: string | undefined, signal: AbortSignal) =>
+    awaitCurrentViewCapture(stateFor(sessionId), ++seqs.captureSeq, undefined, anonPolledAt(), signal)
 
   // ---- 启停开关：启动时读一次持久化开关（默认启用；失败静默，与视觉/PostGIS 配置读取同模式）----
   loadPluginEnabled()
@@ -654,9 +652,11 @@ export function apply(ctx: Context, config: Config): void {
       + '已有 features 时直接读其属性回答（如名称/面积/地址），无需重查数据库。'
       + 'webgis_navigate / webgis_load_dataset 会自动使上次点击记录失效，因此导航后再调用'
       + '会捕获导航后的新视图，无需额外参数；仅当用户手动拖动/缩放地图后（无 navigate 调用）才需要传 refresh: true；'
+      + '要定位当前截图上的目标，先传 refresh:true、describe:false 拍图，再把截图编号传给 webgis_locate_map_points。'
       + '与地图当前位置无关的问题不要调用。',
     parameters: {
       refresh: { type: 'boolean', description: 'true = 忽略上次点击/捕获记录，重新捕获当前地图视图' },
+      describe: { type: 'boolean', description: 'false = 只交付截图和元信息，跳过委托模型描述；默认 true' },
     },
     output: {
       schema: {
@@ -665,6 +665,7 @@ export function apply(ctx: Context, config: Config): void {
         properties: {
           ok: { type: 'boolean', required: true },
           id: { type: 'integer' },
+          screenshotId: { type: 'integer' },
           longitude: { type: 'number' },
           latitude: { type: 'number' },
           bbox: { type: 'json' },
@@ -681,6 +682,7 @@ export function apply(ctx: Context, config: Config): void {
       render: (_args, value) => {
         const v = value as {
           ok?: boolean
+          screenshotId?: number
           longitude?: number
           latitude?: number
           features?: unknown
@@ -712,13 +714,16 @@ export function apply(ctx: Context, config: Config): void {
           : '当前画面上没有可见图层。'
         // 像素↔经纬度换算工具已停止开放（见 PIXEL_TOOLS_ENABLED）：这里**绝不能**再提示模型去调
         // webgis_project / webgis_unproject —— 那会让它对着不存在的工具名产生幻觉。
-        const body = `${head}\n${layersText}`
+        const screenshotIdText = v.screenshotId === undefined ? '' : `\n截图编号 screenshotId=${v.screenshotId}。`
+        const body = `${head}${screenshotIdText}\n${layersText}`
         if (!v.attachImage) {
           const visionText = v.vision
             ? `\n视觉模型分析：${v.vision}`
             : v.visionNote
               ? `\n${v.visionNote}`
-              : ' 当前模型不支持图像输入，截图未附上；接入视觉模型后即可直接看图。'
+              : v.screenshotId === undefined
+                ? ' 当前模型不支持图像输入，未附截图。'
+                : ' 当前模型不支持图像输入，截图已保存，可按截图编号交给视觉定位工具。'
           return text(body + visionText)
         }
         return [{ type: 'image', attachment: shot.ref } as ContentBlock, ...text(body)]
@@ -730,13 +735,14 @@ export function apply(ctx: Context, config: Config): void {
       let fromCapture = false
       let pick = st.pick
       if (!pick || args.refresh === true) {
-        const result = await awaitCurrentViewCapture(st, ++seqs.captureSeq, undefined, anonPolledAt())
+        const result = await captureView(exec.agent?.id, exec.signal)
         if (!result.ok) return { ok: false, message: result.message }
         pick = result.pick
         fromCapture = true
       }
       const shot = pick.screenshot ? screenshotMeta(pick.screenshot) : null
       const shotRef = pick.screenshot?.ref ?? null
+      if (pick.screenshot) rememberScreenshot(st, pick.id, pick.screenshot)
       // 视图范围 bbox：截图那一刻的地图覆盖范围（截图缺失时为 null）。
       const bbox = shot ? [shot.extent.west, shot.extent.south, shot.extent.east, shot.extent.north] : null
       // 当前画面上的图层摘要：截图只有 WebGL canvas（不含 DOM 图层列表/标注），
@@ -747,7 +753,7 @@ export function apply(ctx: Context, config: Config): void {
       // 没配则该工具只回文本元信息（bbox/图层/命中要素），不做任何匿名兜底转发。
       let vision = ''
       let visionNote = ''
-      if (shot && shotRef && !mainSupportsImage) {
+      if (shot && shotRef && !mainSupportsImage && args.describe !== false) {
         const result: VisionAnalysisResult = await analyzeScreenshotChain(
           ctx, effectiveVision(), pick, shotRef, shot)
         if (result.ok && result.text) {
@@ -759,6 +765,7 @@ export function apply(ctx: Context, config: Config): void {
       return {
         ok: true,
         id: pick.id,
+        ...(shot ? { screenshotId: pick.id } : {}),
         longitude: pick.lng,
         latitude: pick.lat,
         bbox: bbox as unknown as JsonValue,
@@ -776,7 +783,7 @@ export function apply(ctx: Context, config: Config): void {
           if (mainSupportsImage) return `${base}与截图`
           if (vision) return `${base}（已委托视觉模型分析）`
           if (visionNote) return `${base}${visionNote}`
-          return `${base}（当前模型不支持图像，未附截图）`
+          return `${base}，已保存截图。`
         })(),
       }
     },
@@ -787,6 +794,7 @@ export function apply(ctx: Context, config: Config): void {
   // 而程序化像素扫描 ≈11m —— 让模型估像素再换算这条路本身不成立。
   // 保留代码（geo.ts 的换算函数另被截图地理范围计算复用），只是不注册、模型看不到。
   if (PIXEL_TOOLS_ENABLED) registerPixelTools(ctx, stateFor)
+  registerLocatorTool(ctx, stateFor, effectiveVision)
 
   // ---- GIS 矢量处理工具（Turf）：作用于图层注册表，AI 可直接调用并链式操作 ----
   // 状态按会话隔离：工具 execute 内以 exec.agent?.id 解析到该会话自己的注册表。

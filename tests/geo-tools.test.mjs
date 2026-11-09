@@ -85,12 +85,13 @@ test('registerGeoTools：经 inject 注册全局工具纪律系统提示段（#6
   assert.ok(defs.length >= 35)
 })
 
-test('全部 42 个 geo 工具注册正确（颜色工具已并入样式工具）', () => {
+test('全部 45 个 geo 工具注册正确', () => {
   const { defs } = setup()
   const names = defs.map((d) => d.name).sort()
   const expected = [
     'webgis_attribute_join', 'webgis_average_nearest_neighbor', 'webgis_bounding_box',
     'webgis_buffer', 'webgis_centroids', 'webgis_clear_layers', 'webgis_clip',
+    'webgis_create_point', 'webgis_create_line', 'webgis_create_polygon',
     'webgis_convex_hull', 'webgis_difference', 'webgis_dissolve', 'webgis_explode', 'webgis_export_basemap',
     'webgis_feature_summary', 'webgis_getis_ord', 'webgis_gini', 'webgis_intersect', 'webgis_kernel_density', 'webgis_layer_info',
     'webgis_list_layers', 'webgis_local_moran', 'webgis_moran_i', 'webgis_moran_inspect', 'webgis_move_layer', 'webgis_od_matrix', 'webgis_regular_grid', 'webgis_remove_layer',
@@ -102,6 +103,43 @@ test('全部 42 个 geo 工具注册正确（颜色工具已并入样式工具�
     'webgis_spatial_join', 'webgis_stat_inspect', 'webgis_union', 'webgis_voronoi',
   ].sort()
   assert.deepEqual(names, expected)
+})
+
+test('创建点、线和面，结果上图到当前会话，面边界自动闭合', async () => {
+  const { run, stateFor } = setup()
+  const sid = 'drawing-session'
+  const start = [116.4, 39.9]
+  const end = [116.42, 39.91]
+  const pointResult = await run('webgis_create_point', { coordinates: start, name: '起点', properties: { kind: 'survey' } }, sid)
+  const lineResult = await run('webgis_create_line', { coordinates: [start, end] }, sid)
+  const polygonResult = await run('webgis_create_polygon', { coordinates: [[0, 0], [0, 2], [2, 1]] }, sid)
+  assert.ok(pointResult.ok && lineResult.ok && polygonResult.ok)
+  assert.deepEqual(lineResult.bbox, [...start, ...end])
+  const [pointLayer, lineLayer, polygonLayer] = stateFor(sid).layers
+  assert.match(pointLayer.name, /起点/)
+  assert.deepEqual(pointLayer.geojson.features[0].properties, { kind: 'survey', name: '起点' })
+  assert.deepEqual(pointLayer.geojson.features[0].geometry, { type: 'Point', coordinates: start })
+  assert.deepEqual(lineLayer.geojson.features[0].geometry, { type: 'LineString', coordinates: [start, end] })
+  assert.deepEqual(polygonLayer.geojson.features[0].geometry, { type: 'Polygon', coordinates: [[[0, 0], [2, 1], [0, 2], [0, 0]]] })
+  assert.deepEqual(stateFor('other-session').layers, [])
+})
+
+test('创建工具拒绝越界坐标、零长线、退化面及自相交面，图层保持原样', async () => {
+  const { run, state } = setup([polygonLayer])
+  for (const [tool, coordinates, pattern] of [
+    ['point', [116.4, 91], /经度.*纬度/],
+    ['line', [[0, 0], [0, 0]], /不同/],
+    ['polygon', [[0, 0], [1, 1], [2, 2]], /面积/],
+    ['polygon', [[0, 0], [2, 2], [0, 2], [2, 0]], /自相交/],
+  ]) {
+    const result = await run(`webgis_create_${tool}`, { coordinates })
+    assert.equal(result.ok, false)
+    assert.match(result.message, pattern)
+  }
+  const batch = await run('webgis_create_point', { points: [{ coordinates: [0, 0] }, { coordinates: [1, 91] }] })
+  assert.equal(batch.ok, false)
+  assert.match(batch.message, /第 2 个点/)
+  assert.deepEqual(state.layers, [polygonLayer])
 })
 
 test('buffer 产出新图层，返回要素数/bbox/layerId', async () => {

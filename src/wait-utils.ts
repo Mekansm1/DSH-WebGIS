@@ -5,6 +5,7 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { BasemapExportResult, PickState, WebgisState } from './session-state.js'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 /** 每类元素在模型侧渲染为一条文本。 */
 export function text(content: string): ContentBlock[] {
@@ -57,25 +58,31 @@ export async function awaitCurrentViewCapture(
   seq: number,
   waitMs: number = CAPTURE_WAIT_MS,
   anonPolledAt?: number | null,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; pick: PickState } | { ok: false; message: string }> {
-  state.capture = { seq }
+  if (signal?.aborted) return { ok: false, message: '当前视图截图已取消。' }
+  if (state.capture) return { ok: false, message: '本会话已有地图截图请求，请等它完成后重试。' }
+  const request: NonNullable<WebgisState['capture']> = { seq }
+  state.capture = request
   state.captureError = null
   const deadline = Date.now() + waitMs
-  while (Date.now() < deadline) {
-    await delay(POLL_STEP_MS)
-    if (state.captureError) {
-      const err = state.captureError
+  try {
+    while (Date.now() < deadline) {
+      await sleep(POLL_STEP_MS, undefined, { signal })
+      if (state.capture !== request) return { ok: false, message: '当前视图截图已取消。' }
+      if (state.captureError) return { ok: false, message: `当前视图截图失败：${state.captureError}` }
+      if (request.pick) return { ok: true, pick: request.pick }
+    }
+    return { ok: false, message: `当前视图截图超时（请确保地图在 GIS 模式可见，或点击地图后再询问）${clientLiveness(state, anonPolledAt)}` }
+  } catch (error) {
+    if (!signal?.aborted) throw error
+    return { ok: false, message: '当前视图截图已取消。' }
+  } finally {
+    if (state.capture === request) {
       state.capture = null
       state.captureError = null
-      return { ok: false, message: `当前视图截图失败：${err}` }
-    }
-    if (state.pick?.captureSeq === seq) {
-      state.capture = null
-      return { ok: true, pick: state.pick }
     }
   }
-  state.capture = null
-  return { ok: false, message: `当前视图截图超时（请确保地图在 GIS 模式可见，或点击地图后再询问）${clientLiveness(state, anonPolledAt)}` }
 }
 
 /** 出图结果等待上限（出图含用户弹窗确认/合成，放宽到 60s）。 */

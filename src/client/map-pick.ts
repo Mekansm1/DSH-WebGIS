@@ -194,6 +194,7 @@ export function recordPick(
   if (shot) payload.screenshot = shot
   // 原先这里是 fetch(...).catch(() => {}) —— 回传被拒（体积 413 / 路由 404 / 断网）时完全静默，
   // host 侧只剩一句「截图超时」。改为失败时把原因也送回去（见 post-json.ts）。
-  void postJsonReportingFailure('/webgis/pick', sessionId, payload)
+  void postJsonReportingFailure('/webgis/pick', sessionId, payload,
+    captureSeq === undefined ? undefined : { captureSeq })
   return shot
 }

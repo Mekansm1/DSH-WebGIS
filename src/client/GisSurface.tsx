@@ -109,34 +109,6 @@ export function GisSurface(props: GlobalStandardProps & PropsLocale<'webgis'>) {
     if (pluginEnabled === false && current) webgisModeStore.clearMode(current)
   }, [pluginEnabled, current])
 
-  // 宿主弹窗/菜单（设置、插件、各处下拉菜单）打开时让地图让位：
-  // GIS 地图挂在 shell.overlay（宿主 z-index:20）上，官方桌面端里会盖住宿主弹层。
-  // 检测到宿主 dialog/menu 就加 html[data-webgis-host-modal]，CSS 把地图 visibility 隐藏
-  // （不用 display:none，保持尺寸，避免 maplibre 反复 resize）。
-  useEffect(() => {
-    if (mode !== 'gis' || pluginEnabled === false) return
-    const root = document.documentElement
-    const SELECTOR = '[role="dialog"][aria-modal="true"], [role="menu"], [data-shortcut-modal]'
-    const detect = (): void => {
-      const open = document.querySelector(SELECTOR) != null
-      const marked = root.dataset.webgisHostModal !== undefined
-      if (open && !marked) {
-        root.dataset.webgisHostModal = ''
-        console.info('[webgis] 宿主弹窗/菜单已打开，地图暂时隐藏')
-      } else if (!open && marked) {
-        delete root.dataset.webgisHostModal
-        console.info('[webgis] 宿主弹窗/菜单已关闭，地图恢复')
-      }
-    }
-    detect()
-    const mo = new MutationObserver(detect)
-    mo.observe(document.body, { childList: true, subtree: true })
-    return () => {
-      mo.disconnect()
-      delete root.dataset.webgisHostModal
-    }
-  }, [mode, pluginEnabled])
-
   // 离开一个"未提交"的会话时清掉其模式：DSH 会复用/重新聚焦被隐藏的空白会话，
   // 若不清理，上次选的模式会被当作默认继承，导致新会话不再弹选择器。
   // "未提交" = 会话已从列表移除（被删）或仍是空白（无消息）；有内容的会话模式保留。

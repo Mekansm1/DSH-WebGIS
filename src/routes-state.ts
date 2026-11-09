@@ -31,7 +31,7 @@ export const handleState: RouteHandler = (_req, res, _url, _pathname, _sessionId
     // 图层摘要（不含 geojson，避免 1s 轮询传全量数据）；变更检测靠每层 rev。
     layers: state.layers.map(summarize),
     navigate: state.navigate,
-    capture: state.capture,
+    capture: state.capture ? { seq: state.capture.seq } : null,
     // 出图请求（AI 工具置；客户端见新 seq 打开弹窗预填）与最近一次出图元信息（不含附件 ref，客户端不需要）。
     exportRequest: state.exportRequest,
     // 底图要素导出请求（AI 工具置；客户端见新 seq 后按当前视窗提取并回传 /webgis/basemap-extract）。

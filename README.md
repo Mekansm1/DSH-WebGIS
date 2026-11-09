@@ -6,10 +6,18 @@ Author: Frank Wang · Feedback: [cywanghn@gmail.com](mailto:cywanghn@gmail.com)
 
 ## Compatibility
 
-- **Requires DSH `0.2.1`** (built and tested against `0.2.1-rc.2`). This release is **not compatible with earlier harness versions**. If you are on an older DSH, upgrade the harness before updating this plugin.
+- WebGIS `0.2.2` targets **DSH `0.2.2-rc.1`** and **Node.js `>=24.9.0`**. For WebGIS `0.2.1`, use DSH `0.2.1-rc.2`.
 - Targets the DSH **Web profile** and requires the host `webServer` service. The official Desktop transport is not yet supported.
-- Install: `npx --yes @deepseek-ai/dsh plugin --profile web add dsh-webgis`
+- Install WebGIS 0.2.2 with `npx --yes @deepseek-ai/dsh@0.2.2-rc.1 plugin --profile web add dsh-webgis@0.2.2`.
 - pnpm ≥ 10 needs no `approve-builds` step: DuckDB ships as the official Node Neo package (`@duckdb/node-api`) with a platform-specific prebuilt binding through optional dependencies. A normal `pnpm install` is sufficient. The platform still has to be one DuckDB Node Neo supports, and packages must be fetchable from the npm registry.
+
+## What's New in 0.2.2
+
+- **DSH Web compatibility.** Updated the harness dependencies to target DSH `0.2.2-rc.1`.
+- **Map interaction.** Restored dragging in GIS mode, kept the map visible while opening the conversation model picker, and gave the Plugins screen priority over the map.
+- **Raster screenshot picking.** The vision model estimates the target's horizontal and vertical position on a 0–1 scale. Normalization aims to improve picking accuracy when images are resized. The WGS84 conversion uses the viewport saved with the screenshot, and the resulting coordinates remain visual estimates.
+- **AI feature creation.** Added tools to create a point layer from one or more points, a line layer from ordered vertices, and a polygon layer from a validated outer ring.
+- **Screenshot capture.** Matched each capture to its own request and kept recent screenshots available within their conversation so later map clicks do not replace the image used for picking.
 
 ## What's New in 0.2.1
 
@@ -205,22 +213,37 @@ Combined with deck.gl's GPU-driven 3D rendering — hex columns, wall extrusions
 
 ## Installation and Configuration
 
-Requirements: **DSH `0.2.1`** with the web profile, plus `pnpm` on your PATH. (0.2.1 is not compatible with earlier harness versions — see [Compatibility](#compatibility).)
+WebGIS 0.2.2 requires **DSH `0.2.2-rc.1`** with the web profile and `pnpm` on your PATH.
 
 ```bash
-dsh plugin --profile web add dsh-webgis
+dsh plugin --profile web add dsh-webgis@0.2.2
 # After installation restart with: dsh web
 # Then start a new conversation and select GIS mode.
 ```
 
 Optional configuration (Settings → Plugins → the **WebGIS** tab, or the plugin configuration file `cordis.patch.yml`):
 
-- Vision model — provider / model / baseURL / apiKey. Configure this for visual features such as “where is this place?” and reading a map from a screenshot. If the main model is multimodal, the plugin uses it directly and this can remain empty. If the main model is text-only and no vision model is configured, visual tools still return structured coordinate and feature data, but do not analyse images.
+- Vision model — provider / model / baseURL / apiKey. Configure this for visual features such as “where is this place?” and reading a map from a screenshot. Map descriptions go directly to a multimodal conversation model. With a text-only conversation model, image analysis needs a configured vision model.
 - PostGIS database — host / port / database / user / password. Passwords are stored in DSH's credential store and never written to disk in plaintext.
 - DuckDB thresholds and memory limit.
 
+### Locate points from a map screenshot
+
+In GIS mode, the AI can combine three tools to capture the current map and add visible landmarks to a point layer. It can also stop after any step so you can inspect the result.
+
+1. `webgis_get_pick` with `refresh: true, describe: false` captures the view and returns a screenshot ID.
+2. `webgis_locate_map_points` sends that screenshot to the vision model. The model estimates the target's position as a fraction of the image width and height measured from the top left. The tool converts the estimated point or box center to WGS84 using the viewport saved with the screenshot.
+3. `webgis_create_point` adds the converted points to a single new layer and preserves the screenshot ID, normalized coordinates, and `vision-estimate` source as attributes.
+
+The normalized ratios reduce dependence on image dimensions. Coordinate accuracy still depends on where the vision model estimates the target to be. If the model cannot identify the target, the tool can return an empty list.
+
+### Create features from coordinates
+
+Use `webgis_create_point`, `webgis_create_line`, or `webgis_create_polygon` to add a new layer. Pass WGS84 `[longitude, latitude]` for a point or an ordered list of coordinate pairs for a line or polygon. Polygon creation closes the outer ring automatically and rejects self-intersections and zero-area rings. For multiple points in the same layer, pass `points` with a `coordinates` pair and optional `name` and `properties` for each point.
+
 ### Example prompts
 
+> - “Capture the current map, find three clearly visible landmarks, and add them to a point layer.”
 > - “Load this `xxx.shp` onto the map”
 > - “Are these points spatially clustered? Show them as a hex heatmap”
 > - “Filter the points from `dataset A` that fall inside `region B`”

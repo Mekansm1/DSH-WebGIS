@@ -2,7 +2,7 @@
  * /webgis/pick 路由（POST）：前端上报点击地图 / 响应 state.capture 的「捕获当前视图」。
  * 拆分自 src/index.ts 的 HTTP 路由大 handler；行为零变化。
  */
-import type { PickFeature } from './session-state.js'
+import type { PickFeature, PickState } from './session-state.js'
 import { json, jsonError, MAX_PICK_BODY, readBody } from './http-utils.js'
 import { parseScreenshot } from './screenshot-utils.js'
 import type { RouteApi, RouteHandler } from './route-shared.js'
@@ -15,12 +15,18 @@ export const handlePick: RouteHandler = (req, res, _url, _pathname, _sessionId, 
         lng?: unknown; lat?: unknown; features?: unknown; screenshot?: unknown
         captureSeq?: unknown; ok?: unknown; message?: unknown; clear?: unknown
       }
+      const captureSeq = typeof data.captureSeq === 'number' ? data.captureSeq : undefined
+      const capture = state.capture
+      if (captureSeq !== undefined && (capture?.seq !== captureSeq || capture.pick)) {
+        return json(res, { ok: true })
+      }
       // 客户端主动报告捕获失败（截图不可用），不写 pick，供等待中的工具读取。
       if (data.ok === false) {
-        state.captureError = typeof data.message === 'string' && data.message
-          ? data.message.slice(0, 200)
-          : 'capture failed'
-        state.capture = null
+        if (captureSeq !== undefined) {
+          state.captureError = typeof data.message === 'string' && data.message
+            ? data.message.slice(0, 200)
+            : 'capture failed'
+        }
         return json(res, { ok: true })
       }
       // 右键清除图钉：清掉最近一次 pick（坐标/要素/截图），后续 webgis_get_pick 将重新捕获当前视图。
@@ -52,16 +58,16 @@ export const handlePick: RouteHandler = (req, res, _url, _pathname, _sessionId, 
         return { ...f, layer: lyr?.name ?? f.layer, properties: { ...attrs } }
       })
       const screenshot = await parseScreenshot(api.ctx, data.screenshot)
+      if (captureSeq !== undefined && (state.capture !== capture || capture?.pick || state.captureError)) {
+        return json(res, { ok: true })
+      }
       if (data.screenshot !== undefined && data.screenshot !== null && !screenshot) {
         api.ctx.logger.warn('[webgis] 截图解析/保存失败，仅记录坐标与要素')
       }
-      const captureSeq = typeof data.captureSeq === 'number' && Number.isFinite(data.captureSeq)
-        ? data.captureSeq
-        : undefined
-      // 捕获成功即视为该请求已被消费；等待中的工具靠 pick.captureSeq 识别本次结果。
-      if (captureSeq !== undefined) state.capture = null
-      state.pick = { id: ++api.seqs.pickSeq, lng, lat, features: richFeatures, screenshot, ...(captureSeq !== undefined ? { captureSeq } : {}) }
-      json(res, { ok: true, id: state.pick.id })
+      const pick: PickState = { id: ++api.seqs.pickSeq, lng, lat, features: richFeatures, screenshot, ...(captureSeq !== undefined ? { captureSeq } : {}) }
+      state.pick = pick
+      if (captureSeq !== undefined && capture) capture.pick = pick
+      json(res, { ok: true, id: pick.id })
     } catch (err) {
       jsonError(res, 400, err instanceof Error ? err.message : '请求体无效')
     }

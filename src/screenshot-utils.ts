@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { GeoViewport } from './geo.js'
 import { unprojectCssToLngLat } from './geo.js'
-import type { PickScreenshot } from './session-state.js'
+import type { PickScreenshot, WebgisState } from './session-state.js'
 import type { GisLayer } from './geo-processing.js'
 
 /** 工具输出 canonical 值里携带的截图元信息（render 用它构造图片块与换算提示文本）。 */
@@ -24,6 +24,14 @@ export interface ScreenshotMeta {
 
 /** (provider:model) → 是否支持图像输入的缓存，避免每次工具调用都解析模型。 */
 const imageCapabilityCache = new Map<string, boolean>()
+
+/** 保留少量已交付截图的引用和视口，不受后续地图点击影响。 */
+export function rememberScreenshot(state: WebgisState, id: number, shot: PickScreenshot): void {
+  const screenshots = state.screenshots
+  screenshots.delete(id)
+  screenshots.set(id, shot)
+  if (screenshots.size > 4) screenshots.delete(screenshots.keys().next().value!)
+}
 
 /** 一个可见图层在「当前画面」里的摘要。 */
 export interface LayerDigest {

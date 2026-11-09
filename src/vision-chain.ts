@@ -103,7 +103,7 @@ export function createDeadline(totalMs: number) {
 }
 
 /** OpenAI 兼容视觉消息：text + base64 image_url。 */
-export interface OpenAIVisionMessage {
+export type OpenAIVisionMessage = { role: 'system'; content: string } | {
   role: 'user'
   content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>
 }
@@ -216,7 +216,7 @@ async function nativeVisionCall(
   model: string,
   ref: ImageAttachmentRef,
   prompt: string,
-  signal: AbortSignal,
+  options: { signal: AbortSignal; system?: string; maxTokens: number },
 ): Promise<string> {
   const imgBlock: ContentBlock = { type: 'image', attachment: ref }
   const message = createUserMessage({
@@ -224,7 +224,7 @@ async function nativeVisionCall(
     // 0.1.7 起没有通用的 'plugin' kind，改用本插件自声明的 kind（见 src/dsh-llm-augment.d.ts）。
     source: { kind: 'webgis' },
   })
-  const chunks = ctx.llm.stream({ provider, model, messages: [message], maxTokens: VISION_MAX_TOKENS, signal })
+  const chunks = ctx.llm.stream({ provider, model, messages: [message], ...options })
   let textOut = ''
   let failed = false
   for await (const chunk of chunks) {
@@ -285,34 +285,38 @@ export async function analyzeScreenshotChain(
     + '请用中文描述这张地图截图：这是什么地理区域、图上可见的地名/要素、该位置附近有什么，'
     + '并综合判断这个位置最可能是什么地方。回答控制在 200 字以内。'
 
-  // 读一次图片字节（HTTP 路径需要 base64；原生路径只用 ref）。
-  let imageBytes: Uint8Array | null = null
-  try {
-    const stored = await ctx.attachments.readImage(ref)
-    imageBytes = stored.data
-  } catch {
-    imageBytes = null
-  }
+  return requestScreenshotVision(ctx, vision, ref, prompt)
+}
 
+/** 单张截图的视觉调用，供地图描述和结构化目标定位共用。 */
+export async function requestScreenshotVision(
+  ctx: Context,
+  vision: VisionConfig | null,
+  ref: ImageAttachmentRef,
+  prompt: string,
+  options: { system?: string; maxTokens?: number; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<VisionAnalysisResult> {
   const resolveCredential = (env: string) => resolveCredentialValue(ctx, env)
-  const deadline = createDeadline(DEFAULT_VISION_TASK_TIMEOUT_MS)
+  const deadline = createDeadline(options.timeoutMs ?? DEFAULT_VISION_TASK_TIMEOUT_MS)
+  const maxTokens = options.maxTokens ?? VISION_MAX_TOKENS
   const attempted: string[] = []
   const failures: Array<{ label: string; kind: VisionFailureKind }> = []
 
   /** 组装一条后端调用（label 用于诊断/失败汇总）。 */
   const httpCall = (provider: HttpVisionProvider): (signal: AbortSignal) => Promise<string> => {
-    return (signal) => {
-      if (imageBytes === null) throw new Error(`http provider "${provider.name}": image bytes unavailable`)
-      const msgs = buildOpenAIVisionMessages(imageBytes, ref.mediaType ?? 'image/png', prompt)
+    return async (signal) => {
+      const { data } = await ctx.attachments.readImage(ref)
+      const msgs = buildOpenAIVisionMessages(data, ref.mediaType ?? 'image/png', prompt)
+      if (options.system) msgs.unshift({ role: 'system', content: options.system })
       return callOpenAICompatible(provider, msgs, {
-        maxTokens: VISION_MAX_TOKENS,
+        maxTokens,
         signal,
         resolveCredential,
       })
     }
   }
   const nativeCall = (provider: string, model: string): (signal: AbortSignal) => Promise<string> => {
-    return (signal) => nativeVisionCall(ctx, provider, model, ref, prompt, signal)
+    return (signal) => nativeVisionCall(ctx, provider, model, ref, prompt, { signal, maxTokens, system: options.system })
   }
 
   const backends: Array<{ label: string; run: (signal: AbortSignal) => Promise<string> }> = []
@@ -333,10 +337,15 @@ export async function analyzeScreenshotChain(
       failures.push({ label: backend.label, kind: 'TIMEOUT' })
       break
     }
-    const callBudget = Math.min(deadline.remaining(), MAX_SINGLE_CALL_MS)
+    const callBudget = Math.min(deadline.remaining(), options.timeoutMs ?? MAX_SINGLE_CALL_MS)
+    const signals = [deadline.signal(), AbortSignal.timeout(callBudget)]
+    if (options.signal) signals.push(options.signal)
+    const signal = AbortSignal.any(signals)
     let textOut = ''
     try {
-      textOut = await backend.run(AbortSignal.any([deadline.signal(), AbortSignal.timeout(callBudget)]))
+      signal.throwIfAborted()
+      textOut = await backend.run(signal)
+      signal.throwIfAborted()
     } catch (err) {
       const kind = classifyVisionFailure(err)
       failures.push({ label: backend.label, kind })
